@@ -35,6 +35,10 @@ class PlcServiceError(RuntimeError):
         super().__init__(f"PlcService.{operation}{context}: {message}")
 
 
+class PlcPointValidationError(PlcServiceError):
+    """A point write was rejected before any PLC command was sent."""
+
+
 class PlcService(LifecycleTracked):
     """Point-oriented PLC service. D/M addresses stay inside points.yml."""
 
@@ -125,12 +129,12 @@ class PlcService(LifecycleTracked):
             guard(point_id, value)
         point = self.get_point(point_id)
         if not point.writable:
-            raise PlcServiceError("write_point", "點位不可寫入", point_id=point_id)
+            raise PlcPointValidationError("write_point", "點位不可寫入", point_id=point_id)
         self._validate_range(point, value)
-        self._require_client(point.plc)
         try:
             if point.device.upper() == "D":
                 encoded = self._encode_d(point, value)
+                self._require_client(point.plc)
                 self._write_once(
                     point.plc,
                     lambda item: item.write_d_register(point.address, encoded),
@@ -138,11 +142,20 @@ class PlcService(LifecycleTracked):
                 )
                 return
             parsed = self._parse_bool(value)
+            self._require_client(point.plc)
             self._write_once(
                 point.plc,
                 lambda item: item.write_bit_device(point.device.upper(), point.address, [parsed]),
                 point_id,
             )
+        except PlcPointValidationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise PlcPointValidationError(
+                "write_point",
+                f"點位值格式錯誤: {value!r}",
+                point_id=point_id,
+            ) from exc
         except PlcServiceError:
             raise
         except Exception as exc:
@@ -249,11 +262,26 @@ class PlcService(LifecycleTracked):
     def _validate_range(point: PointDefinition, value: Any) -> None:
         if point.device.upper() != "D":
             return
-        numeric = float(value)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise PlcPointValidationError(
+                "write_point",
+                f"點位值格式錯誤: {value!r}",
+                point_id=point.id,
+            ) from exc
         if point.min is not None and numeric < float(point.min):
-            raise PlcServiceError("write_point", f"數值 {numeric:g} 低於下限 {point.min}", point_id=point.id)
+            raise PlcPointValidationError(
+                "write_point",
+                f"數值 {numeric:g} 低於下限 {point.min}",
+                point_id=point.id,
+            )
         if point.max is not None and numeric > float(point.max):
-            raise PlcServiceError("write_point", f"數值 {numeric:g} 高於上限 {point.max}", point_id=point.id)
+            raise PlcPointValidationError(
+                "write_point",
+                f"數值 {numeric:g} 高於上限 {point.max}",
+                point_id=point.id,
+            )
 
     @classmethod
     def _decode_d(cls, point: PointDefinition, values: list[int]) -> float | int:

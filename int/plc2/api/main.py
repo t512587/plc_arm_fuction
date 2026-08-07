@@ -8,8 +8,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TypeVar
-import struct
+from typing import Any, Callable, List, Optional
 import threading
 import time
 
@@ -17,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from config.loader import CONFIG_STORE, PointDefinition
-from plc.client import MitsubishiPLCClient, PLCConnectionError
+from plc.client import PLCConnectionError
 from flow.home_flow import HomeFlow
 from flow.main_cycle_flow import (
     MainCycleFlow,
@@ -29,7 +28,7 @@ from flow.vision_height_flow import VisionHeightFlow
 from lifecycle import LifecycleStatus
 from service.home_service import HomeService
 from service.lift_service import LiftService, LiftServiceError
-from service.plc_service import PLC_SERVICE, PlcServiceError
+from service.plc_service import PLC_SERVICE, PlcPointValidationError, PlcServiceError
 from service.y_axes_service import YAxesService
 from service.pallet_transfer_service import PalletTransferService
 from service.vision_bridge_service import VisionBridgeService
@@ -138,20 +137,6 @@ def print_write_error(message: str) -> None:
     print(f"[WRITE ERROR] {message}", file=sys.stderr, flush=True)
 
 
-def parse_bool_value(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "on", "yes"}:
-            return True
-        if normalized in {"0", "false", "off", "no", ""}:
-            return False
-    raise ValueError(f"invalid boolean value: {value}")
-
-
 from pathlib import Path as _Path
 
 _VERSION_FILE = _Path(__file__).resolve().parent.parent / "VERSION"
@@ -161,7 +146,6 @@ except FileNotFoundError:
     APP_VERSION = "0.0.0"
 
 app = FastAPI(title="PLC Backend API", version=APP_VERSION)
-T = TypeVar("T")
 
 
 # ===== 資料模型 =====
@@ -238,106 +222,7 @@ def get_current_user() -> str:
     return "demo_user"
 
 
-# ===== PLC Client 管理 =====
-
-
-class PLCManager:
-    """簡單的 PLC client 管理器，負責連線/斷線。"""
-
-    def __init__(self) -> None:
-        self._clients: Dict[str, MitsubishiPLCClient] = {}
-        self._lock = threading.RLock()
-
-    def connect(self, plc_name: str) -> None:
-        with self._lock:
-            plc_def = CONFIG_STORE.get_plc(plc_name)
-            if plc_def is None:
-                logger.error("connect 失敗：PLC '%s' 未在設定中定義", plc_name)
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"PLC '{plc_name}' 未在設定中定義",
-                )
-
-            # 若已存在 client，先關閉
-            if plc_name in self._clients:
-                try:
-                    self._clients[plc_name].close()
-                except (PLCConnectionError, PlcServiceError):
-                    logger.warning("關閉既有 PLC 連線時發生錯誤 (plc=%s)", plc_name)
-
-            client = MitsubishiPLCClient(
-                host=plc_def.host,
-                port=plc_def.port,
-                unit=plc_def.unit,
-            )
-            logger.info(
-                "嘗試連線 PLC name=%s host=%s port=%s unit=%s",
-                plc_name,
-                plc_def.host,
-                plc_def.port,
-                plc_def.unit,
-            )
-            client.connect()
-            self._clients[plc_name] = client
-            logger.info("PLC 連線成功 plc=%s", plc_name)
-
-    def disconnect(self, plc_name: str) -> None:
-        with self._lock:
-            client = self._clients.pop(plc_name, None)
-            if client is not None:
-                logger.info("關閉 PLC 連線 plc=%s", plc_name)
-                client.close()
-            else:
-                logger.info("嘗試關閉 PLC 連線，但未找到既有連線 plc=%s", plc_name)
-
-    def get_client(self, plc_name: str) -> MitsubishiPLCClient:
-        client = self._clients.get(plc_name)
-        if client is None:
-            logger.info("尚未有 PLC 連線，進行 lazy connect plc=%s", plc_name)
-            self.connect(plc_name)
-            client = self._clients[plc_name]
-        return client
-
-    def with_retry(self, plc_name: str, action: Callable[[MitsubishiPLCClient], T]) -> T:
-        with self._lock:
-            client = self.get_client(plc_name)
-            try:
-                return action(client)
-            except (PLCConnectionError, PlcServiceError) as first_exc:
-                logger.warning(
-                    "PLC 通訊失敗，準備重連後重試一次 plc=%s error=%s",
-                    plc_name,
-                    first_exc,
-                )
-                self.disconnect(plc_name)
-                self.connect(plc_name)
-                client = self.get_client(plc_name)
-                try:
-                    result = action(client)
-                    logger.info("PLC 重連後重試成功 plc=%s", plc_name)
-                    return result
-                except (PLCConnectionError, PlcServiceError) as second_exc:
-                    logger.error(
-                        "PLC 重連後重試仍失敗 plc=%s first_error=%s second_error=%s",
-                        plc_name,
-                        first_exc,
-                        second_exc,
-                    )
-                    raise second_exc from first_exc
-
-    def read_d_register(self, plc_name: str, address: int, count: int = 1) -> List[int]:
-        return self.with_retry(plc_name, lambda client: client.read_d_register(address, count=count))
-
-    def write_d_register(self, plc_name: str, address: int, values: List[int]) -> None:
-        self.with_retry(plc_name, lambda client: client.write_d_register(address, values))
-
-    def read_bit_device(self, plc_name: str, device: str, address: int, count: int = 1) -> List[bool]:
-        return self.with_retry(plc_name, lambda client: client.read_bit_device(device, address, count=count))
-
-    def write_bit_device(self, plc_name: str, device: str, address: int, values: List[bool]) -> None:
-        self.with_retry(plc_name, lambda client: client.write_bit_device(device, address, values))
-
-
+# One shared point-oriented service owns all PLC clients and type conversion.
 PLC_MANAGER = PLC_SERVICE
 HOME_SERVICE = HomeService(PLC_SERVICE)
 LIFT_SERVICE = LiftService(PLC_SERVICE)
@@ -773,10 +658,7 @@ async def get_registers_by_points(
     plc: Optional[str] = None,
     user: str = Depends(get_current_user),  # noqa: ARG001
 ) -> APIResponse:
-    """依 point_id 清單讀取多個點位的數值。
-
-    目前實作為逐點讀取，之後可優化成按 PLC + device grouping。
-    """
+    """Read configured points through the shared point-oriented service."""
 
     results: List[PointValueOut] = []
 
@@ -786,69 +668,22 @@ async def get_registers_by_points(
             logger.warning("get_registers_by_points: 找不到 point_id=%s", pid)
             continue
 
-        target_plc = plc or point.plc
+        if plc is not None and plc != point.plc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"point '{pid}' belongs to PLC '{point.plc}', "
+                    f"not requested PLC '{plc}'"
+                ),
+            )
+
         try:
-            if point.device.upper() == "D":
-                # 根據 type + pair_high + scale 解析 D 暫存器
-                raw_values = PLC_MANAGER.read_d_register(target_plc, point.address, count=1)
-                raw_lo = int(raw_values[0]) if raw_values else 0
-                value: float | int
-
-                t = point.type.lower()
-                scale = point.scale if point.scale is not None else 1.0
-
-                def u16(x: int) -> int:
-                    return x & 0xFFFF
-
-                def s16(x: int) -> int:
-                    x = u16(x)
-                    return x - 0x10000 if x & 0x8000 else x
-
-                if t in {"int", "s16", "u16"}:
-                    if t == "u16":
-                        value = float(u16(raw_lo))
-                    else:  # int 或 s16
-                        value = float(s16(raw_lo))
-                elif t in {"s32", "u32", "f32"} and point.pair_high is not None:
-                    # 32-bit / float：需要讀兩個 D
-                    raw_pair = PLC_MANAGER.read_d_register(target_plc, point.address, count=2)
-                    lo = int(raw_pair[0]) if len(raw_pair) > 0 else 0
-                    hi = int(raw_pair[1]) if len(raw_pair) > 1 else 0
-
-                    def u32(lo_: int, hi_: int) -> int:
-                        return (u16(hi_) << 16) | u16(lo_)
-
-                    def s32(lo_: int, hi_: int) -> int:
-                        x = u32(lo_, hi_)
-                        return x - 0x100000000 if x & 0x80000000 else x
-
-                    if t == "s32":
-                        value = float(s32(lo, hi))
-                    elif t == "u32":
-                        value = float(u32(lo, hi))
-                    else:  # f32
-                        b = struct.pack("<HH", u16(lo), u16(hi))
-                        value = float(struct.unpack("<f", b)[0])
-                else:
-                    logger.error(
-                        "不支援的 D 型態或設定錯誤 point_id=%s type=%s pair_high=%s",
-                        pid,
-                        point.type,
-                        point.pair_high,
-                    )
-                    continue
-
-                value *= scale
-
-            else:
-                # bit 類裝置
-                bits = PLC_MANAGER.read_bit_device(target_plc, point.device, point.address, count=1)
-                value = bool(bits[0]) if bits else False
+            value = PLC_SERVICE.read_point(pid)
 
             logger.info(
                 "by-points 讀取成功 point_id=%s plc=%s device=%s addr=%s value=%s",
                 pid,
-                target_plc,
+                point.plc,
                 point.device,
                 point.address,
                 value,
@@ -858,16 +693,16 @@ async def get_registers_by_points(
             logger.error(
                 "by-points 讀取失敗 point_id=%s plc=%s error=%s",
                 pid,
-                target_plc,
+                point.plc,
                 exc,
             )
             # 若是連線被中止，關閉 client，讓下次呼叫時重新連線
             if "10053" in str(exc):
-                PLC_MANAGER.disconnect(target_plc)
+                PLC_SERVICE.disconnect(point.plc)
                 break
             continue
 
-    return APIResponse(ok=True, data=[r.dict() for r in results])
+    return APIResponse(ok=True, data=[r.model_dump() for r in results])
 
 
 @app.get("/plc/registers", response_model=APIResponse)
@@ -956,7 +791,7 @@ async def write_registers(
             body.start,
             body.values,
         )
-    except LiftServiceError as exc:
+    except (LiftServiceError, SlotVacuumServiceError, MiddleVacuumServiceError) as exc:
         print_write_error(
             f"/plc/registers/write plc={plc} device={body.device} "
             f"start={body.start} values={body.values} safety_error={exc}"
@@ -1000,12 +835,7 @@ async def write_by_point(
     plc: Optional[str] = None,
     user: str = Depends(get_current_user),  # noqa: ARG001
 ) -> APIResponse:
-    """依 point_id 寫入點位。
-
-    TODO:
-        - 加入權限檢查 (writable / user role)
-        - 加入 min/max 範圍驗證
-    """
+    """Write a configured point through the shared point-oriented service."""
 
     logger.info(
         "API /plc/registers/write-by-point point_id=%s value=%s plc=%s",
@@ -1026,117 +856,34 @@ async def write_by_point(
             detail=f"point '{body.point_id}' not found",
         )
 
-    target_plc = plc or point.plc
+    if plc is not None and plc != point.plc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"point '{point.id}' belongs to PLC '{point.plc}', "
+                f"not requested PLC '{plc}'"
+            ),
+        )
+
     try:
-        t = point.type.lower()
-        # D 類型：支援 int/s16/u16/s32/u32/f32 + scale/pair_high
-        if point.device.upper() == "D":
-            scale = point.scale if point.scale is not None else 1.0
-
-            def u16(x: int) -> int:
-                return x & 0xFFFF
-
-            def s16(x: int) -> int:
-                x = u16(x)
-                return x - 0x10000 if x & 0x8000 else x
-
-            def u32(lo_: int, hi_: int) -> int:
-                return (u16(hi_) << 16) | u16(lo_)
-
-            def s32(lo_: int, hi_: int) -> int:
-                x = u32(lo_, hi_)
-                return x - 0x100000000 if x & 0x80000000 else x
-
-            # 將外部給的工程值反算回 raw 值
-            try:
-                eng_value = float(body.value)
-            except (TypeError, ValueError):
-                print_write_error(
-                    f"/plc/registers/write-by-point point_id={point.id} "
-                    f"plc={target_plc} value={body.value} error=invalid numeric value"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"invalid numeric value for D point: {body.value}",
-                ) from None
-
-            raw_float = eng_value / scale
-
-            if t in {"int", "s16", "u16", "bit"}:  # 單 word（bit 不應出現在 D，但防呆）
-                raw = int(round(raw_float))
-                # 寫入一顆 D
-                PLC_MANAGER.write_d_register(target_plc, point.address, [raw])
-            elif t in {"s32", "u32", "f32"} and point.pair_high is not None:
-                # 32-bit / float：拆成兩顆 D（lo = address, hi = pair_high）
-                if t == "f32":
-                    b = struct.pack("<f", float(raw_float))
-                    lo, hi = struct.unpack("<HH", b)
-                else:
-                    raw32 = int(round(raw_float))
-                    lo = raw32 & 0xFFFF
-                    hi = (raw32 >> 16) & 0xFFFF
-
-                # 依 address 起點寫兩顆 D（假設 pair_high = address+1）
-                PLC_MANAGER.write_d_register(target_plc, point.address, [lo, hi])
-            else:
-                print_write_error(
-                    f"/plc/registers/write-by-point point_id={point.id} "
-                    f"plc={target_plc} value={body.value} type={point.type} "
-                    f"pair_high={point.pair_high} error=unsupported D point type or config"
-                )
-                logger.error(
-                    "write-by-point 不支援的 D 型態或設定錯誤 point_id=%s type=%s pair_high=%s",
-                    point.id,
-                    point.type,
-                    point.pair_high,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"unsupported D point type or config: {point.type}",
-                )
-
-        elif t == "bit":
-            try:
-                value_bool = parse_bool_value(body.value)
-            except ValueError:
-                print_write_error(
-                    f"/plc/registers/write-by-point point_id={point.id} "
-                    f"plc={target_plc} value={body.value} error=invalid boolean value"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"invalid boolean value for bit point: {body.value}",
-                ) from None
-            PLC_MANAGER.write_bit_device(target_plc, point.device, point.address, [value_bool])
-        else:
-            # 其他暫不支援
-            print_write_error(
-                f"/plc/registers/write-by-point point_id={point.id} "
-                f"plc={target_plc} value={body.value} type={point.type} "
-                f"error=unsupported point type"
-            )
-            logger.error("不支援的 point type=%s (point_id=%s)", point.type, point.id)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"unsupported point type: {point.type}",
-            )
+        PLC_SERVICE.write_point(point.id, body.value)
 
         logger.info(
             "write-by-point 成功 point_id=%s name=%s plc=%s value=%s",
             point.id,
             point.name,
-            target_plc,
+            point.plc,
             body.value,
         )
-    except LiftServiceError as exc:
+    except (LiftServiceError, SlotVacuumServiceError, MiddleVacuumServiceError) as exc:
         print_write_error(
             f"/plc/registers/write-by-point point_id={point.id} "
-            f"plc={target_plc} value={body.value} safety_error={exc}"
+            f"plc={point.plc} value={body.value} safety_error={exc}"
         )
         logger.warning(
             "安全互鎖拒絕 point 寫入 point_id=%s plc=%s value=%s error=%s",
             point.id,
-            target_plc,
+            point.plc,
             body.value,
             exc,
         )
@@ -1144,15 +891,31 @@ async def write_by_point(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    except PlcPointValidationError as exc:
+        print_write_error(
+            f"/plc/registers/write-by-point point_id={point.id} "
+            f"plc={point.plc} value={body.value} validation_error={exc}"
+        )
+        logger.warning(
+            "point 寫入驗證失敗 point_id=%s plc=%s value=%s error=%s",
+            point.id,
+            point.plc,
+            body.value,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except (PLCConnectionError, PlcServiceError) as exc:
         print_write_error(
             f"/plc/registers/write-by-point point_id={point.id} "
-            f"plc={target_plc} value={body.value} error={exc}"
+            f"plc={point.plc} value={body.value} error={exc}"
         )
         logger.error(
             "write-by-point 失敗 point_id=%s plc=%s error=%s",
             point.id,
-            target_plc,
+            point.plc,
             exc,
         )
         raise HTTPException(
@@ -1166,7 +929,7 @@ async def write_by_point(
             "point_id": point.id,
             "name": point.name,
             "value": body.value,
-            "plc": target_plc,
+            "plc": point.plc,
         },
     )
 

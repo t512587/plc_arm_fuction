@@ -113,6 +113,8 @@ action_main.py
 
 `points.yml` 是 PLC 位址的唯一來源。每筆資料包含 `id`、`device`、`address`、`type`、`writable` 等欄位；`PlcService` 依照這些欄位決定使用 D word 或 M bit 讀寫。D 點可使用 `s16`、`u16`、`s32`、`u32`、`f32`，並可用 `scale` 將 PLC 原始值轉成工程單位。
 
+一般 UI、API 與流程都必須透過 `PlcService.read_point()`／`write_point()` 或設備 Service 的動作函式控制 PLC。這條路徑會統一套用 `writable`、數值範圍、型別轉換與設備互鎖。`/plc/registers/write` 是保留給低階診斷的原始位址介面，不應用於正常設備流程。
+
 目前主要點位如下：
 
 | 功能 | 業務 point ID | PLC 位址 | 用途 |
