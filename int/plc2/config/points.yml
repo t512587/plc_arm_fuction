@@ -1,0 +1,264 @@
+# Y1 / Y2 軸相關參數與控制點
+
+- id: Y1_HOME
+  name: "Y1回原點"
+  plc: main_plc
+  device: M
+  address: 11
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_CUR_POS
+  name: "Y1現在位置"
+  plc: main_plc
+  device: D
+  address: 62
+  type: int  
+  writable: false
+  group: "Y1"
+
+- id: Y1_MOVE
+  name: "左側前進到指定位置"
+  plc: main_plc
+  device: M
+  address: 375
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_VAC_ON
+  name: "左側真空"
+  plc: main_plc
+  device: M
+  address: 50
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_VAC_OFF
+  name: "左側破真空"
+  plc: main_plc
+  device: M
+  address: 51
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_SPEED
+  name: "Y1前進速度"
+  plc: main_plc
+  device: D
+  address: 240
+  type: int
+  min: 1
+  max: 32767
+  writable: true
+  group: "Y1"
+
+- id: Y1_FWD_POS
+  name: "Y1前進位置"
+  plc: main_plc
+  device: D
+  address: 510
+  type: int
+  min: -32768
+  max: 32767
+  writable: true
+  group: "Y1"
+
+- id: Y2_HOME
+  name: "Y2回原點"
+  plc: main_plc
+  device: M
+  address: 12
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_CUR_POS
+  name: "Y2現在位置"
+  plc: main_plc
+  device: D
+  address: 72
+  type: int  
+  writable: false
+  group: "Y2"
+
+- id: Y2_MOVE
+  name: "右側前進到指定位置"
+  plc: main_plc
+  device: M
+  address: 374
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_VAC_ON
+  name: "右側真空"
+  plc: main_plc
+  device: M
+  address: 52
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_VAC_OFF
+  name: "右側破真空"
+  plc: main_plc
+  device: M
+  address: 53
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_FWD_POS
+  name: "Y2前進位置"
+  plc: main_plc
+  device: D
+  address: 560
+  type: int
+  min: -32768
+  max: 32767
+  writable: true
+  group: "Y2"
+
+- id: X_HOME
+  name: "X回原點"
+  plc: main_plc
+  device: M
+  address: 10
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_CUR_POS
+  name: "X現在位置"
+  plc: main_plc
+  device: D
+  address: 52
+  type: int
+  writable: false
+  group: "X"
+
+- id: X_Move
+  name: "升降機上升到指定位置"
+  plc: main_plc
+  device: M
+  address: 376
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_FWD_POS
+  name: "X 軸移動目標值"
+  plc: main_plc
+  device: D
+  address: 500
+  type: int
+  min: 0
+  max: 1450
+  writable: true
+  group: "X"
+
+- id: X_SPEED
+  name: "X 軸移動速度"
+  plc: main_plc
+  device: D
+  address: 210
+  type: int
+  min: 1
+  max: 32767
+  writable: true
+  group: "X"
+
+- id: X_MOVE_DOWN
+  name: "升降機下降到指定位置"
+  plc: main_plc
+  device: M
+  address: 379
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_UP
+  name: "X 軸手動上升"
+  plc: main_plc
+  device: M
+  address: 350
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_DOWN
+  name: "X 軸手動下降"
+  plc: main_plc
+  device: M
+  address: 351
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_VAC_ON
+  name: "中間真空"
+  plc: main_plc
+  device: M
+  address: 54
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_VAC_OFF
+  name: "中間破真空"
+  plc: main_plc
+  device: M
+  address: 56
+  type: bit
+  writable: true
+  group: "X"
+
+# INT UI quick-position aliases.  These preserve the field names used by the
+# integrated UI while keeping the original INT point IDs above available.
+- id: y1_up_pos
+  name: "Y1 上升位置"
+  plc: main_plc
+  device: D
+  address: 500
+  type: int
+  min: 0
+  max: 1450
+  writable: true
+  group: "快速定位"
+
+- id: y1_forward_pos
+  name: "Y1 前進位置"
+  plc: main_plc
+  device: D
+  address: 510
+  type: int
+  min: -32768
+  max: 32767
+  writable: true
+  group: "快速定位"
+
+- id: y2_up_pos
+  name: "Y2 上升位置"
+  plc: main_plc
+  device: D
+  address: 550
+  type: int
+  min: 0
+  max: 1450
+  writable: true
+  group: "快速定位"
+
+- id: y2_forward_pos
+  name: "Y2 前進位置"
+  plc: main_plc
+  device: D
+  address: 560
+  type: int
+  min: -32768
+  max: 32767
+  writable: true
+  group: "快速定位"

@@ -1,0 +1,25 @@
+target_height_mm: 560.0
+tolerance_mm: 1.0
+stable_read_count: 3
+poll_interval_seconds: 0.1
+vacuum_build_seconds: 0.5
+settle_seconds: 0.5
+timeout_seconds: 30.0
+minimum_height_mm: 0.0
+maximum_height_mm: 1450.0
+
+height_point: x_current_pos
+# M376 positions to 560mm from either direction; M379 returns to 0mm.
+up_command_point: LIFT_UP_POS
+down_command_point: LIFT_DN_POS
+vacuum_points:
+  - L_VAC_ON
+  - R_VAC_ON
+vacuum_release_points:
+  - L_VAC_REL
+  - R_VAC_REL
+vacuum_feedback_points: []
+vacuum_feedback_timeout_seconds: 3.0
+trigger_reset_seconds: 0.15
+unchanged_timeout_seconds: 5.0
+minimum_motion_delta_mm: 1.0

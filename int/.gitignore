@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime outputs (regenerated every detect run)
+control_color.png
+control_depth.png
+control_depth_vis.png
+control_mask.png
+control_result.png
+control_target.json
+target_feedback.json
+sam2_auto_*.png
+
+# Logs
+*.log
+logs/
+log/
+canbus/log/
+
+# Calibration working files (not source code)
+calibration_points_*.csv
+calibration_fit_result_*.txt
+calibration_records/
+captures/
+
+# Archives and binaries
+*.7z
+*.zip
+USB-CAN-A/
+canbus/book/
+
+# Backups
+bk/
+*.bak
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Submodule-like repos (have their own .git)
+base/
+amr/
+
+# PLC runtime state
+plc2/runtime/
+plc2/logs/
+
+# Misc
+.pytest_cache/
+.codex/

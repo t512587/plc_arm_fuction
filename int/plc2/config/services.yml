@@ -1,0 +1,116 @@
+services:
+  home:
+    command_points:
+      X: X_HOME
+      Y1: Y1_HOME
+      Y2: Y2_HOME
+    position_points:
+      X: X_CUR_POS
+      Y1: Y1_CUR_POS
+      Y2: Y2_CUR_POS
+
+  lift:
+    height_point: X_CUR_POS
+    # D500 是定位目標值；實際啟動命令必須使用 M376/M379。
+    target_point: X_FWD_POS
+    speed_point: X_SPEED
+    positioning_speed: 200
+    up_point: X_Move
+    down_point: X_MOVE_DOWN
+    manual_motion_points:
+      - X_UP
+      - X_DOWN
+    manual_up_point: X_UP
+    vacuum_points:
+      left: Y1_VAC_ON
+      right: Y2_VAC_ON
+    minimum_height_mm: 0.0
+    maximum_height_mm: 1450.0
+    # 僅能縮小，不可透過設定放寬；程式內另有 695mm 硬上限。
+    arm_camera_not_home_maximum_height_mm: 695.0
+
+  y_axes:
+    command_points:
+      # D510/D560 是目標值，Y 軸動作命令是 M375/M374。
+      Y1: Y1_MOVE
+      Y2: Y2_MOVE
+    position_points:
+      Y1: Y1_CUR_POS
+      Y2: Y2_CUR_POS
+
+  slot_vacuum:
+    slots:
+      Y1:
+        vacuum_point: Y1_VAC_ON
+        break_vacuum_point: Y1_VAC_OFF
+      Y2:
+        vacuum_point: Y2_VAC_ON
+        break_vacuum_point: Y2_VAC_OFF
+    enforcement_interval_seconds: 1.0
+    # 手動關閉 M50/M52 時，對應破真空輸出維持此秒數後再關閉。
+    release_pulse_seconds: 4.0
+
+  middle_vacuum:
+    vacuum_point: X_VAC_ON
+    break_vacuum_point: X_VAC_OFF
+    # 現場若有真空壓力開關，填入對應 bit point_id；未設定時只做定時等待。
+    confirmation_point:
+    confirmation_active_value: true
+    stable_read_count: 3
+    confirmation_timeout_seconds: 5.0
+    poll_interval_seconds: 0.1
+    vacuum_settle_seconds: 4.0
+    # 跨側卸貨：M54 OFF、M56 ON 後固定等待 5 秒，才允許手臂回 HOME。
+    release_settle_seconds: 5.0
+
+  pallet_transfer:
+    slots:
+      Y1:
+        forward_target_point: Y1_FWD_POS
+        forward_command_point: Y1_MOVE
+        position_point: Y1_CUR_POS
+        vacuum_point: Y1_VAC_ON
+        break_vacuum_point: Y1_VAC_OFF
+      Y2:
+        forward_target_point: Y2_FWD_POS
+        forward_command_point: Y2_MOVE
+        position_point: Y2_CUR_POS
+        vacuum_point: Y2_VAC_ON
+        break_vacuum_point: Y2_VAC_OFF
+    minimum_forward_mm: -32768.0
+    maximum_forward_mm: 32767.0
+
+  vision_bridge:
+    notify_file: runtime/vision_bridge_notify.json
+    height_feedback_file: runtime/vision_height_feedback.json
+    done_signal_file: runtime/vision_done_signal.json
+    height_json_path:
+      - height_mm
+    default_timeout_seconds: 30.0
+    poll_interval_seconds: 0.1
+
+  arm_vision_workflow:
+    enabled: true
+    python_path: .venv/bin/python
+    script_path: d435_control.py
+    # CLI/API 未指定方向時的後備視角；Camera 命名與 PLC Y 軸相反：
+    # UI 的 Y1→Y2 / Y2→Y1 會分別覆寫為 RView / LView。
+    view: LView
+    target_speed_dps: 200
+    settle_seconds: 2.5
+    target_wait_seconds: 2.0
+    pick_wait_seconds: 2.0
+    vision_height_mm: 560.0
+    height_reference_depth_mm: 620.0
+    # 深度大於此門檻才套用 Z*1000-620+560；小於或等於時直接採用實測深度（m→mm）。
+    height_formula_minimum_depth_m: 0.650
+    startup_timeout_seconds: 30.0
+    no_output_timeout_seconds: 90.0
+    overall_timeout_seconds: 600.0
+    poll_interval_seconds: 0.1
+    # 保守預設；上線前應依四顆馬達實測重複定位誤差確認。
+    home_tolerance_degrees: 1.0
+    home_stable_reads: 3
+    home_timeout_seconds: 15.0
+    home_poll_interval_seconds: 0.2
+    cancel_stop_timeout_seconds: 8.0

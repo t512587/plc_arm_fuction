@@ -1,0 +1,10 @@
+vision_height_mm: 560.0
+cross_side_safe_height_mm: 460.0
+height_tolerance_mm: 1.0
+y_position_tolerance_mm: 1.0
+stable_read_count: 2
+poll_interval_seconds: 0.1
+action_delay_seconds: 3.0
+motion_timeout_seconds: 30.0
+y_motion_timeout_seconds: 120.0
+vision_signal_timeout_seconds: 30.0

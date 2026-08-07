@@ -1,0 +1,9 @@
+{
+  "can_interface": "waveshare_usbcana",
+  "channel": "/dev/ttyUSB0",
+  "bitrate": 1000000,
+  "serial_baudrate": 2000000,
+  "motor_id": 4,
+  "timeout_seconds": 1.0,
+  "can_kwargs": {}
+}

@@ -1,0 +1,184 @@
+# Y1 / Y2 軸相關參數與控制點
+
+- id: Y1_HOME
+  name: "Y1回原點"
+  plc: main_plc
+  device: M
+  address: 11
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_CUR_POS
+  name: "Y1現在位置"
+  plc: main_plc
+  device: D
+  address: 62
+  type: int  
+  writable: false
+  group: "Y1"
+
+- id: Y1_MOVE
+  name: "左側前進到指定位置"
+  plc: main_plc
+  device: M
+  address: 375
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_VAC_ON
+  name: "左側真空"
+  plc: main_plc
+  device: M
+  address: 50
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_VAC_OFF
+  name: "左側破真空"
+  plc: main_plc
+  device: M
+  address: 51
+  type: bit
+  writable: true
+  group: "Y1"
+
+- id: Y1_SPEED
+  name: "Y1前進速度"
+  plc: main_plc
+  device: D
+  address: 240
+  type: int
+  writable: true
+  group: "Y1"
+
+- id: Y1_FWD_POS
+  name: "Y1前進位置"
+  plc: main_plc
+  device: D
+  address: 510
+  type: int
+  writable: true
+  group: "Y1"
+
+- id: Y2_HOME
+  name: "Y2回原點"
+  plc: main_plc
+  device: M
+  address: 12
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_CUR_POS
+  name: "Y2現在位置"
+  plc: main_plc
+  device: D
+  address: 72
+  type: int  
+  writable: false
+  group: "Y2"
+
+- id: Y2_MOVE
+  name: "右側前進到指定位置"
+  plc: main_plc
+  device: M
+  address: 374
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_VAC_ON
+  name: "右側真空"
+  plc: main_plc
+  device: M
+  address: 52
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_VAC_OFF
+  name: "右側破真空"
+  plc: main_plc
+  device: M
+  address: 53
+  type: bit
+  writable: true
+  group: "Y2"
+
+- id: Y2_FWD_POS
+  name: "Y2前進位置"
+  plc: main_plc
+  device: D
+  address: 560
+  type: int
+  writable: true
+  group: "Y1"
+
+- id: X_HOME
+  name: "X回原點"
+  plc: main_plc
+  device: M
+  address: 10
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_CUR_POS
+  name: "X現在位置"
+  plc: main_plc
+  device: D
+  address: 52
+  type: int
+  writable: false
+  group: "X"
+
+- id: X_Move
+  name: "升降機上升到指定位置"
+  plc: main_plc
+  device: M
+  address: 376
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_FWD_POS
+  name: "X 軸移動目標值"
+  plc: main_plc
+  device: D
+  address: 500
+  type: s32
+  pair_high: 501
+  scale: 0.1
+  writable: true
+  group: "X"
+
+- id: X_SPEED
+  name: "X 軸移動速度"
+  plc: main_plc
+  device: D
+  address: 404
+  type: int
+  writable: true
+  group: "X"
+
+- id: X_VAC_ON
+  name: "中間真空"
+  plc: main_plc
+  device: M
+  address: 54
+  type: bit
+  writable: true
+  group: "X"
+
+- id: X_VAC_OFF
+  name: "中間破真空"
+  plc: main_plc
+  device: M
+  address: 56
+  type: bit
+  writable: true
+  group: "X"
+
