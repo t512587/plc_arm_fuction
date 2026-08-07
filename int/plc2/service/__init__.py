@@ -1,6 +1,6 @@
 from .home_service import HomeService, HomeServiceError
 from .lift_service import LiftService, LiftServiceError
-from .plc_service import PLC_SERVICE, PlcPointValidationError, PlcService, PlcServiceError
+from .plc_service import PLC_SERVICE, PlcService, PlcServiceError
 from .y_axes_service import YAxesService, YAxesServiceConfig, YAxesServiceError
 from .slot_vacuum_service import (
     CargoPurpose,
@@ -29,7 +29,6 @@ __all__ = [
     "LiftServiceError",
     "PlcService",
     "PlcServiceError",
-    "PlcPointValidationError",
     "YAxesService",
     "YAxesServiceConfig",
     "YAxesServiceError",
