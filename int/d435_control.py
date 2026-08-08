@@ -136,7 +136,8 @@ CALIB_BY_VIEW = {
 # still uses general motor limits from canbus/arm_config.py.
 PREDICTION_LIMITS_BY_VIEW = {
     "LView": {
-        "ID 142": (9.0, 114.0),
+        # ID142 mechanical safety limit is HOME(6) ± 90°.
+        "ID 142": (9.0, 96.0),
         "ID 143": (-172.0, -62.0),
     },
 
@@ -150,11 +151,18 @@ REQUIRED_MOTORS = ("ID 142", "ID 143", "ID 144", "ID 145")
 HOME_COMPONENT_MOTORS = {
     "arm": ("ID 142", "ID 143"),
     "camera": ("ID 144", "ID 145"),
+    # Cross-component groups for safe HOME ordering:
+    # "small" = both small arms first (clear collision zone)
+    # "big"   = both big arms second (safe to sweep after small arms retract)
+    "small": ("ID 143", "ID 144"),
+    "big": ("ID 142", "ID 145"),
 }
 INITIAL_HOME_CONFIRMED_MARKER = "[POSE_STATE] INITIAL_HOME_CONFIRMED"
 ALL_HOME_CONFIRMED_MARKER = "[POSE_STATE] ALL_HOME_CONFIRMED"
 ARM_HOME_CONFIRMED_MARKER = "[POSE_STATE] ARM_HOME_CONFIRMED"
 CAMERA_HOME_CONFIRMED_MARKER = "[POSE_STATE] CAMERA_HOME_CONFIRMED"
+SMALL_HOME_CONFIRMED_MARKER = "[POSE_STATE] SMALL_HOME_CONFIRMED"
+BIG_HOME_CONFIRMED_MARKER = "[POSE_STATE] BIG_HOME_CONFIRMED"
 NAMED_POSE_CONFIRMED_MARKER = "[POSE_STATE] NAMED_POSE_CONFIRMED"
 ARM_STOP_CONFIRMED_MARKER = "[POSE_STATE] ARM_STOP_CONFIRMED"
 ARM_STOP_UNCONFIRMED_MARKER = "[POSE_STATE] ARM_STOP_UNCONFIRMED"
@@ -636,7 +644,17 @@ def move_component_home_pose(
     timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> dict[str, float]:
-    """Move only the arm pair or camera pair to HOME and confirm readback."""
+    """Move a motor group to HOME and confirm readback.
+
+    Supported components:
+      "arm"    — ID142 + ID143 (small arm first, then big arm)
+      "camera" — ID144 + ID145 (camera small first, then camera big)
+      "small"  — ID143 + ID144 (both small arms, independent axes, simultaneous)
+      "big"    — ID142 + ID145 (both big arms, independent axes, simultaneous)
+
+    For safe full-HOME: call "small" first, confirm, then "big".
+    This prevents big arms from sweeping into the pillar before small arms clear.
+    """
 
     try:
         motor_labels = HOME_COMPONENT_MOTORS[component]
@@ -666,19 +684,53 @@ def move_component_home_pose(
             )
         check_general_motor_limits(label, target)
 
-    print(f"[MOVE] Return {component} motors to HOME: {list(motor_labels)}")
-    for label, target in targets.items():
-        motor_id = MOTORS[label]
-        response = controller.service.absolute_position_control(
-            motor_id,
-            target,
-            HOME_SPEED_DPS,
-        )
+    # --- Movement ordering ---
+    # "arm" / "camera": same kinematic chain, small link must retract first
+    #   to create clearance before big link sweeps.
+    # "small" / "big": independent axes on different chains, can move
+    #   simultaneously — no collision risk within the group.
+    SEQUENTIAL_ORDER: dict[str, tuple[str, ...]] = {
+        "arm": ("ID 143", "ID 142"),
+        "camera": ("ID 144", "ID 145"),
+    }
+
+    sequential = SEQUENTIAL_ORDER.get(component)
+    if sequential is not None:
+        # Same-chain pair: small link first, wait, then big link
         print(
-            f"[CAN] {label} → HOME {target:.2f}° @ {HOME_SPEED_DPS} dps | "
-            f"raw={response.get('raw', '')}",
-            flush=True,
+            f"[MOVE] Return {component} motors to HOME "
+            f"(small link first): {list(sequential)}"
         )
+        for index, label in enumerate(sequential):
+            target = targets[label]
+            motor_id = MOTORS[label]
+            response = controller.service.absolute_position_control(
+                motor_id, target, HOME_SPEED_DPS,
+            )
+            print(
+                f"[CAN] {label} → HOME {target:.2f}° @ {HOME_SPEED_DPS} dps | "
+                f"raw={response.get('raw', '')}",
+                flush=True,
+            )
+            if index == 0 and settle_sec > 0:
+                time.sleep(settle_sec)
+    else:
+        # Cross-chain group ("small" or "big"): independent axes, send all
+        print(
+            f"[MOVE] Return {component} motors to HOME "
+            f"(independent axes): {list(motor_labels)}"
+        )
+        for label in motor_labels:
+            target = targets[label]
+            motor_id = MOTORS[label]
+            response = controller.service.absolute_position_control(
+                motor_id, target, HOME_SPEED_DPS,
+            )
+            print(
+                f"[CAN] {label} → HOME {target:.2f}° @ {HOME_SPEED_DPS} dps | "
+                f"raw={response.get('raw', '')}",
+                flush=True,
+            )
     if settle_sec > 0:
         time.sleep(settle_sec)
 
@@ -691,11 +743,13 @@ def move_component_home_pose(
         poll_interval_seconds=poll_interval_seconds,
         motor_labels=motor_labels,
     )
-    marker = (
-        ARM_HOME_CONFIRMED_MARKER
-        if component == "arm"
-        else CAMERA_HOME_CONFIRMED_MARKER
-    )
+    _COMPONENT_MARKERS = {
+        "arm": ARM_HOME_CONFIRMED_MARKER,
+        "camera": CAMERA_HOME_CONFIRMED_MARKER,
+        "small": SMALL_HOME_CONFIRMED_MARKER,
+        "big": BIG_HOME_CONFIRMED_MARKER,
+    }
+    marker = _COMPONENT_MARKERS[component]
     print(marker, flush=True)
     print(
         POSE_RESULT_PREFIX
