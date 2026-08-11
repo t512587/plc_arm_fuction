@@ -1,0 +1,40 @@
+# Sample TXT task for the PLC + arm UI.
+# Load this file from the UI: TXT task file -> Load TXT -> Run TXT.
+
+step
+type=home
+target=all
+
+step
+type=pallet
+slot=Y1
+action=suck
+height_mm=560
+forward_mm=120
+
+step
+type=confirm
+message=Confirm Y1 suction is safe, then continue to vision transfer.
+
+step
+type=vision_transfer
+transfer_direction=Y1_TO_Y2
+
+step
+type=arm_pose
+pose=STANDBY
+
+step
+type=wait
+seconds=1
+
+step
+type=pallet
+slot=Y2
+action=push
+height_mm=560
+forward_mm=120
+
+step
+type=confirm
+message=Confirm the finished workpiece position before ending the task.

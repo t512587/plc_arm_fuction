@@ -1,0 +1,33 @@
+# TXT task example.
+# Supported type values:
+#   pallet, vision_transfer, home, wait, confirm
+
+step
+type=home
+target=all
+
+step
+type=pallet
+slot=Y1
+action=suck
+height_mm=560
+forward_mm=120
+
+step
+type=confirm
+message=Confirm the Y1 pallet action is safe before vision transfer.
+
+step
+type=vision_transfer
+transfer_direction=Y1_TO_Y2
+
+step
+type=wait
+seconds=1
+
+step
+type=pallet
+slot=Y2
+action=push
+height_mm=560
+forward_mm=120

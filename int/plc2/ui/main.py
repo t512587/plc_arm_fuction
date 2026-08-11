@@ -20,13 +20,17 @@ import time
 import math
 import tkinter as tk
 from pathlib import Path
-from tkinter import font as tkfont
+from tkinter import filedialog, font as tkfont
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Callable, Dict, List
 
 import requests
 
 from config.loader import CONFIG_STORE, PointDefinition
+try:
+    from task_file import TaskFileError, TaskStep, parse_task_file
+except ModuleNotFoundError:
+    from plc2.task_file import TaskFileError, TaskStep, parse_task_file
 
 API_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_PLC_NAME = "main_plc"
@@ -138,6 +142,10 @@ class MainWindow(tk.Tk):
         self.main_cycle_final_action_var = tk.StringVar(value="推")
         self.main_cycle_final_height_var = tk.StringVar(value="560")
         self.main_cycle_final_forward_var = tk.StringVar(value="")
+        self.task_file_path_var = tk.StringVar(value="No TXT task loaded")
+        self._task_file_steps: list[TaskStep] = []
+        self._task_file_running = False
+        self._task_file_index = 0
         self.main_cycle_phase = "ready_first_step"
         self.main_cycle_phase_var = tk.StringVar(value="完整流程準備完成：先執行第一步")
         self.main_cycle_run_text_var = tk.StringVar(value="開始完整流程")
@@ -710,6 +718,45 @@ class MainWindow(tk.Tk):
         )
         self.btn_main_cycle_run.grid(row=1, column=1, padx=(8, 8))
         self.btn_main_cycle_reset.grid(row=1, column=2)
+
+        task_file_frame = ttk.LabelFrame(
+            cycle_frame,
+            text="TXT task file",
+            padding=(8, 6),
+        )
+        task_file_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        task_file_frame.columnconfigure(1, weight=1)
+        self.btn_task_file_load = ttk.Button(
+            task_file_frame,
+            text="Load TXT",
+            command=self.on_load_task_file_clicked,
+            state=tk.DISABLED,
+        )
+        self.btn_task_file_run = ttk.Button(
+            task_file_frame,
+            text="Run TXT",
+            command=self.on_run_task_file_clicked,
+            state=tk.DISABLED,
+        )
+        self.btn_task_file_load.grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ttk.Label(task_file_frame, textvariable=self.task_file_path_var).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+        )
+        self.btn_task_file_run.grid(row=0, column=2, padx=(8, 0), sticky="e")
+        task_list_frame = ttk.Frame(task_file_frame)
+        task_list_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        task_list_frame.columnconfigure(0, weight=1)
+        self.task_file_list = tk.Listbox(task_list_frame, height=4, exportselection=False)
+        self.task_file_list.grid(row=0, column=0, sticky="ew")
+        task_file_scroll = ttk.Scrollbar(
+            task_list_frame,
+            orient=tk.VERTICAL,
+            command=self.task_file_list.yview,
+        )
+        task_file_scroll.grid(row=0, column=1, sticky="ns")
+        self.task_file_list.configure(yscrollcommand=task_file_scroll.set)
         self.main_cycle_first_controls.extend(
             (
                 first_slot_combo,
@@ -736,6 +783,8 @@ class MainWindow(tk.Tk):
                 *self.main_cycle_final_controls,
                 self.btn_main_cycle_run,
                 self.btn_main_cycle_reset,
+                self.btn_task_file_load,
+                self.btn_task_file_run,
             )
         )
 
@@ -1469,6 +1518,346 @@ class MainWindow(tk.Tk):
             f"手臂／Camera HOME：未確認（上限 {maximum:g}mm）"
         )
 
+    def on_load_task_file_clicked(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Load TXT task file",
+            filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            steps = parse_task_file(path)
+        except (OSError, TaskFileError) as exc:
+            self._task_file_steps = []
+            self.task_file_path_var.set("No valid TXT task loaded")
+            self.task_file_list.delete(0, tk.END)
+            self.btn_task_file_run.configure(state=tk.DISABLED)
+            messagebox.showerror("TXT task error", str(exc), parent=self)
+            return
+
+        self._task_file_steps = steps
+        self.task_file_path_var.set(path)
+        self.task_file_list.delete(0, tk.END)
+        for step in steps:
+            self.task_file_list.insert(tk.END, self._task_step_summary(step))
+        if self._connected and not self._active_flow and not self._stop_unconfirmed:
+            self.btn_task_file_run.configure(state=tk.NORMAL)
+        self.status_var.set(f"Loaded TXT task: {len(steps)} steps")
+
+    def on_run_task_file_clicked(self) -> None:
+        if not self._connected:
+            messagebox.showwarning("TXT task", "Please connect PLC first.", parent=self)
+            return
+        if self._active_flow is not None:
+            messagebox.showwarning("TXT task", "A flow is already running.", parent=self)
+            return
+        if not self._task_file_steps:
+            messagebox.showwarning("TXT task", "Load a TXT task file first.", parent=self)
+            return
+        preview = "\n".join(
+            self._task_step_summary(step) for step in self._task_file_steps[:8]
+        )
+        if len(self._task_file_steps) > 8:
+            preview += f"\n... {len(self._task_file_steps) - 8} more steps"
+        if not messagebox.askyesno(
+            "Run TXT task",
+            "Run these TXT task steps in order?\n\n"
+            f"{preview}\n\n"
+            "Execution stops on the first error, timeout, or cancellation.",
+            icon="warning",
+            parent=self,
+        ):
+            return
+
+        self._task_file_running = True
+        self._task_file_index = 0
+        self._active_flow = "main-cycle"
+        self._active_flow_label = "TXT task"
+        self._flow_started_at = time.monotonic()
+        self._flow_cancelling = False
+        self._flow_cancel_started_at = None
+        self._flow_cancel_deadline = None
+        self.status_var.set("TXT task started")
+        self.btn_home_flow.configure(state=tk.DISABLED)
+        self.btn_vision_flow.configure(state=tk.DISABLED)
+        self._set_can_home_controls(False)
+        self.btn_cancel_flow.configure(state=tk.NORMAL)
+        self._set_main_cycle_controls(False)
+        self._set_vacuum_controls(False)
+        self._update_flow_elapsed()
+        self.after(0, self._run_next_task_file_step)
+
+    def _run_next_task_file_step(self) -> None:
+        if not self._task_file_running:
+            return
+        if self._task_file_index >= len(self._task_file_steps):
+            self._task_file_running = False
+            self._finish_flow(
+                "TXT task",
+                {
+                    "ok": True,
+                    "data": {
+                        "status": "success",
+                        "state": "success",
+                        "step": "txt_task",
+                        "message": f"TXT task completed: {len(self._task_file_steps)} steps",
+                        "elapsed_seconds": (
+                            time.monotonic() - self._flow_started_at
+                            if self._flow_started_at is not None
+                            else 0.0
+                        ),
+                    },
+                },
+                None,
+                expected_flow="main-cycle",
+            )
+            self.main_cycle_phase = "ready_first_step"
+            self._refresh_main_cycle_phase_ui()
+            return
+
+        step = self._task_file_steps[self._task_file_index]
+        self.task_file_list.selection_clear(0, tk.END)
+        self.task_file_list.selection_set(self._task_file_index)
+        self.task_file_list.see(self._task_file_index)
+        self.status_var.set(
+            f"TXT task step {step.index}/{len(self._task_file_steps)}: "
+            f"{self._task_step_summary(step)}"
+        )
+
+        if step.type == "wait":
+            milliseconds = int(float(step.values["seconds"]) * 1000)
+            self.after(milliseconds, self._complete_current_task_file_step)
+            return
+        if step.type == "confirm":
+            if messagebox.askyesno(
+                "TXT task confirm",
+                step.values.get("message", f"Confirm step {step.index}"),
+                parent=self,
+            ):
+                self._complete_current_task_file_step()
+            else:
+                self._finish_task_file_error(
+                    f"TXT task cancelled at confirm step {step.index}"
+                )
+            return
+
+        requests_to_run = self._task_step_requests(step)
+        self._run_task_file_request_chain(step, requests_to_run, 0)
+
+    def _complete_current_task_file_step(self) -> None:
+        if not self._task_file_running:
+            return
+        self._task_file_index += 1
+        self.after(0, self._run_next_task_file_step)
+
+    def _run_task_file_request_chain(
+        self,
+        step: TaskStep,
+        requests_to_run: list[tuple[str, str, dict[str, Any] | None, float]],
+        request_index: int,
+    ) -> None:
+        if not self._task_file_running:
+            return
+        if request_index >= len(requests_to_run):
+            self._complete_current_task_file_step()
+            return
+
+        label, path, json_payload, timeout = requests_to_run[request_index]
+
+        def worker() -> None:
+            payload: dict[str, Any] | None = None
+            error: str | None = None
+            try:
+                response = requests.post(
+                    API_BASE_URL + path,
+                    json=json_payload,
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+            self._post_ui(
+                lambda: self._handle_task_file_request_result(
+                    step,
+                    requests_to_run,
+                    request_index,
+                    label,
+                    payload,
+                    error,
+                )
+            )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"txt-task-step-{step.index}-{request_index + 1}",
+        ).start()
+
+    def _handle_task_file_request_result(
+        self,
+        step: TaskStep,
+        requests_to_run: list[tuple[str, str, dict[str, Any] | None, float]],
+        request_index: int,
+        label: str,
+        payload: dict[str, Any] | None,
+        request_error: str | None,
+    ) -> None:
+        if not self._task_file_running:
+            return
+        if payload is not None:
+            update_home = getattr(self, "_update_arm_home_from_main_cycle", None)
+            if callable(update_home):
+                update_home(payload)
+        if request_error is not None:
+            self._finish_task_file_error(f"{label} request failed: {request_error}")
+            return
+        if not payload or not payload.get("ok"):
+            data = payload.get("data") if payload else {}
+            if not isinstance(data, dict):
+                data = {}
+            message = str(
+                (payload or {}).get("error")
+                or data.get("message")
+                or f"{label} failed"
+            )
+            self._finish_task_file_error(message, payload)
+            return
+        self._run_task_file_request_chain(step, requests_to_run, request_index + 1)
+
+    def _finish_task_file_error(
+        self,
+        message: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self._task_file_running = False
+        if payload is None or not isinstance(payload.get("data"), dict):
+            payload = {
+                "ok": False,
+                "data": {
+                    "status": "error",
+                    "state": "error",
+                    "step": "txt_task",
+                    "message": message,
+                    "elapsed_seconds": (
+                        time.monotonic() - self._flow_started_at
+                        if self._flow_started_at is not None
+                        else 0.0
+                    ),
+                },
+                "error": message,
+            }
+        self._finish_flow(
+            "TXT task",
+            payload,
+            None,
+            expected_flow="main-cycle",
+        )
+        self.main_cycle_phase = "ready_first_step"
+        self._refresh_main_cycle_phase_ui()
+
+    def _task_step_requests(
+        self,
+        step: TaskStep,
+    ) -> list[tuple[str, str, dict[str, Any] | None, float]]:
+        if step.type == "pallet":
+            payload: dict[str, Any] = {
+                "slot": step.values["slot"],
+                "action": step.values["action"],
+                "height_mm": float(step.values["height_mm"]),
+                "forward_mm": (
+                    None
+                    if step.values.get("forward_mm") in {None, ""}
+                    else float(step.values["forward_mm"])
+                ),
+            }
+            return [
+                (
+                    f"TXT step {step.index} pallet",
+                    "/flows/main-cycle/independent/first-step",
+                    payload,
+                    MAIN_CYCLE_STEP_REQUEST_TIMEOUT_SECONDS,
+                )
+            ]
+        if step.type == "vision_transfer":
+            return [
+                (
+                    f"TXT step {step.index} vision_transfer",
+                    "/flows/main-cycle/independent/second-step",
+                    {"transfer_direction": step.values["transfer_direction"]},
+                    MAIN_CYCLE_SECOND_STEP_REQUEST_TIMEOUT_SECONDS,
+                )
+            ]
+        if step.type == "home":
+            target = step.values["target"]
+            requests_to_run: list[tuple[str, str, dict[str, Any] | None, float]] = []
+            if target in {"plc", "all"}:
+                requests_to_run.append(
+                    (
+                        f"TXT step {step.index} PLC home",
+                        "/flows/home/run",
+                        None,
+                        HOME_FLOW_REQUEST_TIMEOUT_SECONDS,
+                    )
+                )
+            if target in {"arm", "all"}:
+                requests_to_run.append(
+                    (
+                        f"TXT step {step.index} arm home",
+                        "/arm-camera-home/move-arm",
+                        None,
+                        60,
+                    )
+                )
+            if target in {"camera", "all"}:
+                requests_to_run.append(
+                    (
+                        f"TXT step {step.index} camera home",
+                        "/arm-camera-home/move-camera",
+                        None,
+                        60,
+                    )
+                )
+            return requests_to_run
+        if step.type == "arm_pose":
+            pose = step.values["pose"]
+            if pose == "STANDBY":
+                return [
+                    (
+                        f"TXT step {step.index} arm pose STANDBY",
+                        "/arm-camera-standby/move",
+                        None,
+                        60,
+                    )
+                ]
+            raise ValueError(f"Unsupported arm pose: {pose}")
+        raise ValueError(f"Unsupported executable task type: {step.type}")
+
+    @staticmethod
+    def _task_step_summary(step: TaskStep) -> str:
+        if step.type == "pallet":
+            forward = step.values.get("forward_mm", "")
+            return (
+                f"{step.index}. pallet "
+                f"slot={step.values.get('slot')} action={step.values.get('action')} "
+                f"height={step.values.get('height_mm')} forward={forward}"
+            )
+        if step.type == "vision_transfer":
+            return (
+                f"{step.index}. vision_transfer "
+                f"direction={step.values.get('transfer_direction')}"
+            )
+        if step.type == "home":
+            return f"{step.index}. home target={step.values.get('target')}"
+        if step.type == "wait":
+            return f"{step.index}. wait seconds={step.values.get('seconds')}"
+        if step.type == "confirm":
+            return f"{step.index}. confirm {step.values.get('message', '')}"
+        if step.type == "arm_pose":
+            return f"{step.index}. arm_pose pose={step.values.get('pose')}"
+        return f"{step.index}. {step.type}"
+
     def on_main_cycle_run_clicked(self) -> None:
         if self.main_cycle_phase == "ready_first_step":
             self._start_main_cycle_sequence()
@@ -1659,6 +2048,7 @@ class MainWindow(tk.Tk):
     def on_cancel_flow_clicked(self) -> None:
         if self._active_flow is None or self._flow_cancelling:
             return
+        self._task_file_running = False
         active_flow = self._active_flow
         label = self._active_flow_label or "PLC Flow"
         self._flow_cancelling = True
@@ -1914,7 +2304,9 @@ class MainWindow(tk.Tk):
         self._flow_cancel_deadline = None
         self._flow_cancel_poll_in_flight = False
         self.btn_cancel_flow.configure(state=tk.DISABLED)
-        data = payload.get("data", {}) if payload else {}
+        data = payload.get("data") if payload else {}
+        if not isinstance(data, dict):
+            data = {}
         stop_unconfirmed = str(data.get("state") or "") == "stop_unconfirmed"
         if stop_unconfirmed:
             self._stop_unconfirmed = True
@@ -2485,6 +2877,8 @@ class MainWindow(tk.Tk):
                 control.configure(state="readonly" if enabled else tk.DISABLED)
             else:
                 control.configure(state=state)
+        if enabled and not self._task_file_steps:
+            self.btn_task_file_run.configure(state=tk.DISABLED)
         if enabled:
             self._refresh_main_cycle_phase_ui()
 
