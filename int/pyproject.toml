@@ -11,4 +11,6 @@ dependencies = [
     "pyserial>=3.5",
     "python-can[serial]>=4.4.0",
     "requests>=2.32",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.1",
 ]

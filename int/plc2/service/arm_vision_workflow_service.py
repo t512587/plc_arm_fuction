@@ -36,8 +36,6 @@ TargetHeightValidator = Callable[[float], None]
 ALL_HOME_CONFIRMED_MARKER = "[POSE_STATE] ALL_HOME_CONFIRMED"
 ARM_HOME_CONFIRMED_MARKER = "[POSE_STATE] ARM_HOME_CONFIRMED"
 CAMERA_HOME_CONFIRMED_MARKER = "[POSE_STATE] CAMERA_HOME_CONFIRMED"
-SMALL_HOME_CONFIRMED_MARKER = "[POSE_STATE] SMALL_HOME_CONFIRMED"
-BIG_HOME_CONFIRMED_MARKER = "[POSE_STATE] BIG_HOME_CONFIRMED"
 ARM_STOP_CONFIRMED_MARKER = "[POSE_STATE] ARM_STOP_CONFIRMED"
 ARM_STOP_UNCONFIRMED_MARKER = "[POSE_STATE] ARM_STOP_UNCONFIRMED"
 NAMED_POSE_CONFIRMED_MARKER = "[POSE_STATE] NAMED_POSE_CONFIRMED"
@@ -348,8 +346,6 @@ class ArmVisionWorkflowService(LifecycleTracked):
         component_labels = {
             "arm": "手臂 ID142／ID143",
             "camera": "Camera ID144／ID145",
-            "small": "小臂 ID143／ID144",
-            "big": "大臂 ID142／ID145",
         }
         if normalized not in component_labels:
             raise ArmVisionWorkflowServiceError(
@@ -370,13 +366,11 @@ class ArmVisionWorkflowService(LifecycleTracked):
             + 5.0
         )
         label = component_labels[normalized]
-        component_markers = {
-            "arm": ARM_HOME_CONFIRMED_MARKER,
-            "camera": CAMERA_HOME_CONFIRMED_MARKER,
-            "small": SMALL_HOME_CONFIRMED_MARKER,
-            "big": BIG_HOME_CONFIRMED_MARKER,
-        }
-        marker = component_markers[normalized]
+        marker = (
+            ARM_HOME_CONFIRMED_MARKER
+            if normalized == "arm"
+            else CAMERA_HOME_CONFIRMED_MARKER
+        )
         self.home_interlock.mark_not_home(f"正在移動 {label} 回 HOME")
         self._set_status(
             LifecycleStatus.RUNNING,
@@ -902,13 +896,13 @@ class ArmVisionWorkflowService(LifecycleTracked):
                         movement = self._movement_description(line)
                         report(
                             "waiting_safe_height",
-                            f"手臂保持暫停，等待升降機停止並確認 560mm：{movement}",
+                            f"手臂保持暫停，等待升降機停止並確認此動作的安全高度：{movement}",
                             LifecycleStatus.WAITING_SIGNAL,
                         )
                         movement_handoff(movement)
                         report(
                             "safe_height_confirmed",
-                            f"升降機 560mm 已確認，送出手臂繼續訊號：{movement}",
+                            f"升降機安全高度已確認，送出手臂繼續訊號：{movement}",
                         )
                     self._press_enter(process)
 

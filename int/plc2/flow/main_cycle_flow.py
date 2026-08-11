@@ -780,6 +780,7 @@ class MainCycleFlow(LifecycleTracked):
 
             if self.arm_vision_service is not None:
                 step = "step2_arm_vision_pick_place"
+                released_at_cross_side_height = False
 
                 def movement_handoff(movement: str) -> None:
                     nonlocal height, step
@@ -787,7 +788,8 @@ class MainCycleFlow(LifecycleTracked):
                     required_height_mm = (
                         cross_side_height_mm
                         if (
-                            "FAKE PLC PICK DONE" in movement
+                            released_at_cross_side_height
+                            or "FAKE PLC PICK DONE" in movement
                             or "Move left target" in movement
                             or "Move right target" in movement
                         )
@@ -854,18 +856,19 @@ class MainCycleFlow(LifecycleTracked):
                     )
 
                 def place_handoff(target_height_mm: float, control_target: dict) -> None:
-                    nonlocal height, step
-                    work_height_mm = (
-                        safe_height(target_height_mm, "手臂放料高度")
-                        if self._vision_height_1 is None
-                        else self._vision_height_1
-                    )
+                    nonlocal height, step, released_at_cross_side_height
                     step = "step2_place_height"
-                    height = self._move_height(work_height_mm, cancel_event, lambda message: report(f"第二步放料：{message}"))
+                    height = self._confirm_stopped_height(
+                        cross_side_height_mm,
+                        cancel_event,
+                        lambda message: report(
+                            f"第二步放料前 {cross_side_height_mm:g}mm 確認：{message}"
+                        ),
+                    )
                     self.middle_vacuum_service.set_mode(MiddleVacuumMode.BREAK_VACUUM)
                     report(
-                        f"第二步 {place_slot} 放料：D500={work_height_mm:g}mm "
-                        "到位，M54 已關閉，M56 已開啟"
+                        f"第二步 {place_slot} 放料：升降機保持 "
+                        f"D500={cross_side_height_mm:g}mm，M54 已關閉，M56 已開啟"
                     )
                     self.middle_vacuum_service.wait_transfer_ready(
                         vacuum_expected=False,
@@ -876,18 +879,24 @@ class MainCycleFlow(LifecycleTracked):
                     )
                     self.middle_vacuum_service.set_mode(MiddleVacuumMode.OFF)
                     report("第二步放料：M56 破真空 5 秒完成，M54／M56 均已關閉")
+                    released_at_cross_side_height = True
                     step = "step2_safe_height_before_home"
-                    height = self._move_height(
-                        vision_height_mm,
+                    height = self._confirm_stopped_height(
+                        cross_side_height_mm,
                         cancel_event,
-                        lambda message: report(f"第二步回 HOME 前：{message}"),
+                        lambda message: report(
+                            f"第二步回 HOME 前 {cross_side_height_mm:g}mm 確認：{message}"
+                        ),
                     )
                     report(
-                        "第二步回 HOME 前：貨物已釋放，升降機已回到 "
-                        f"{vision_height_mm:g}mm 安全高度，允許手臂回 HOME"
+                        "第二步回 HOME 前：貨物已釋放，升降機維持在 "
+                        f"{cross_side_height_mm:g}mm 且已停止，允許手臂回 HOME"
                     )
                     step = "step2_arm_return_home"
-                    report(f"第二步：{vision_height_mm:g}mm 安全高度已確認，放行手臂回 HOME")
+                    report(
+                        f"第二步：{cross_side_height_mm:g}mm 跨側安全高度已確認，"
+                        "放行手臂回 HOME"
+                    )
 
                 report("第二步：啟動 D435 / CANBus 手臂取放流程")
                 arm_result = self.arm_vision_service.run_pick_and_place(
@@ -942,20 +951,38 @@ class MainCycleFlow(LifecycleTracked):
                 cross_side_height_mm=cross_side_height_mm,
             )
 
-            step = "step2_m56_same_height"
-            height = self._move_height(self._vision_height_1, cancel_event, lambda message: report(f"第二步：{message}"))
+            step = "step2_m56_cross_side_height"
+            height = self._confirm_stopped_height(
+                cross_side_height_mm,
+                cancel_event,
+                lambda message: report(
+                    f"第二步放料前 {cross_side_height_mm:g}mm 確認：{message}"
+                ),
+            )
             self.middle_vacuum_service.set_mode(MiddleVacuumMode.BREAK_VACUUM)
             self.middle_vacuum_service.wait_transfer_ready(
                 vacuum_expected=False,
                 cancel_event=cancel_event,
                 progress_callback=lambda message: report(f"第二步：{message}"),
             )
-            self.vision_bridge_service.notify("m56_on_m54_off_after_same_height", height_mm=self._vision_height_1)
+            self.vision_bridge_service.notify(
+                "m56_on_m54_off_at_cross_side_height",
+                height_mm=cross_side_height_mm,
+            )
             self.middle_vacuum_service.set_mode(MiddleVacuumMode.OFF)
 
-            step = "step2_return_after_m56"
-            height = self._move_height(vision_height_mm, cancel_event, lambda message: report(f"第二步：{message}"))
-            self.vision_bridge_service.notify("returned_vision_height_after_m56", vision_height_mm=vision_height_mm)
+            step = "step2_hold_cross_side_height_after_m56"
+            height = self._confirm_stopped_height(
+                cross_side_height_mm,
+                cancel_event,
+                lambda message: report(
+                    f"第二步破真空後 {cross_side_height_mm:g}mm 確認：{message}"
+                ),
+            )
+            self.vision_bridge_service.notify(
+                "held_cross_side_height_after_m56",
+                cross_side_height_mm=cross_side_height_mm,
+            )
 
             step = "step2_wait_done"
             report("第二步：等待 RealSense/CANBus 完成信號", LifecycleStatus.WAITING_SIGNAL)

@@ -20,6 +20,8 @@ message=Confirm the Y1 pallet action is safe before vision transfer.
 step
 type=vision_transfer
 transfer_direction=Y1_TO_Y2
+# Repeat this complete vision-transfer cycle three times.
+repeat=3
 
 step
 type=wait

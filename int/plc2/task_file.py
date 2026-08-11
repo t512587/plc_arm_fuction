@@ -9,6 +9,7 @@ SLOTS = {"Y1", "Y2", "NONE"}
 ACTIONS = {"suck", "push", "none"}
 DIRECTIONS = {"Y1_TO_Y2", "Y2_TO_Y1"}
 HOME_TARGETS = {"plc", "arm", "camera", "all"}
+MAX_VISION_TRANSFER_REPEAT = 100
 
 
 class TaskFileError(ValueError):
@@ -93,6 +94,13 @@ def _validate_step(step: TaskStep) -> None:
                 f"step {step.index}: transfer_direction must be Y1_TO_Y2 or Y2_TO_Y1"
             )
         step.values["transfer_direction"] = direction
+        repeat = _positive_integer(
+            step,
+            "repeat",
+            default=1,
+            maximum=MAX_VISION_TRANSFER_REPEAT,
+        )
+        step.values["repeat"] = str(repeat)
     elif step.type == "home":
         target = _required(step, "target").casefold()
         if target not in HOME_TARGETS:
@@ -145,6 +153,29 @@ def _number(step: TaskStep, key: str) -> float:
         return float(value)
     except ValueError as exc:
         raise TaskFileError(f"step {step.index}: {key} must be a number") from exc
+
+
+def _positive_integer(
+    step: TaskStep,
+    key: str,
+    *,
+    default: int,
+    maximum: int,
+) -> int:
+    raw_value = step.values.get(key)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    try:
+        value = int(raw_value.strip())
+    except ValueError as exc:
+        raise TaskFileError(
+            f"step {step.index}: {key} must be a whole number"
+        ) from exc
+    if value < 1 or value > maximum:
+        raise TaskFileError(
+            f"step {step.index}: {key} must be between 1 and {maximum}"
+        )
+    return value
 
 
 def _normalize_action(value: str) -> str:

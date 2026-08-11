@@ -20,6 +20,7 @@ class TaskFileParserTests(unittest.TestCase):
             step
             type=vision_transfer
             transfer_direction=Y1_TO_Y2
+            repeat=3
 
             step
             type=home
@@ -46,6 +47,7 @@ class TaskFileParserTests(unittest.TestCase):
         self.assertEqual("Y1", steps[0].values["slot"])
         self.assertEqual("suck", steps[0].values["action"])
         self.assertEqual("Y1_TO_Y2", steps[1].values["transfer_direction"])
+        self.assertEqual("3", steps[1].values["repeat"])
         self.assertEqual("all", steps[2].values["target"])
         self.assertEqual("STANDBY", steps[5].values["pose"])
 
@@ -97,6 +99,32 @@ class TaskFileParserTests(unittest.TestCase):
                 transfer_direction=Y1_TO_Y3
                 """
             )
+
+    def test_vision_transfer_repeat_defaults_to_one(self) -> None:
+        steps = parse_task_text(
+            """
+            step
+            type=vision_transfer
+            transfer_direction=Y2_TO_Y1
+            """
+        )
+
+        self.assertEqual("1", steps[0].values["repeat"])
+
+    def test_rejects_invalid_vision_transfer_repeat(self) -> None:
+        for repeat in ("0", "-1", "1.5", "abc", "101"):
+            with self.subTest(repeat=repeat), self.assertRaisesRegex(
+                TaskFileError,
+                "repeat",
+            ):
+                parse_task_text(
+                    f"""
+                    step
+                    type=vision_transfer
+                    transfer_direction=Y1_TO_Y2
+                    repeat={repeat}
+                    """
+                )
 
     def test_rejects_negative_wait(self) -> None:
         with self.assertRaisesRegex(TaskFileError, "seconds must be >= 0"):

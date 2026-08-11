@@ -6,11 +6,26 @@ type=home
 target=all
 
 step
+type=arm_pose
+pose=STANDBY
+
+step
+type=confirm
+message=Confirm Y1 suction is safe, then continue to vision transfer.
+
+step
 type=pallet
 slot=Y1
 action=suck
-height_mm=560
+height_mm=175
 forward_mm=120
+
+step
+type=pallet
+slot=Y1
+action=suck
+height_mm=0
+forward_mm=0
 
 step
 type=confirm
@@ -19,21 +34,36 @@ message=Confirm Y1 suction is safe, then continue to vision transfer.
 step
 type=vision_transfer
 transfer_direction=Y1_TO_Y2
+repeat = 2
+
+step
+type=pallet
+slot=Y1
+action=suck
+height_mm=0
+forward_mm=0
 
 step
 type=arm_pose
 pose=STANDBY
 
 step
-type=wait
-seconds=1
+type=confirm
+message=Confirm Y1 suction is safe, then continue to vision transfer.
 
 step
 type=pallet
-slot=Y2
+slot=Y1
 action=push
-height_mm=560
+height_mm=180
 forward_mm=120
+
+step
+type=pallet
+slot=Y1
+action=push
+height_mm=0
+forward_mm=0
 
 step
 type=confirm

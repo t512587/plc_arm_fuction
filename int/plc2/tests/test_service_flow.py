@@ -54,6 +54,7 @@ from api.main import (
     _request_flow_cancellation,
     _run_independent_main_cycle_step,
     app,
+    run_independent_main_cycle_second_step,
 )
 from service.plc_service import PLC_SERVICE
 from ui.main import MainWindow
@@ -300,13 +301,17 @@ class FakeSlotVacuumDomainService:
 
 
 class FakeMiddleVacuumDomainService:
-    def __init__(self) -> None:
+    def __init__(self, height_provider=None) -> None:
         self.modes: list[str] = []
         self.confirmations: list[str] = []
+        self.height_provider = height_provider
+        self.release_heights: list[float] = []
 
     def set_mode(self, mode) -> dict[str, bool | str]:
         value = mode.value if hasattr(mode, "value") else str(mode)
         self.modes.append(value)
+        if value == MiddleVacuumMode.BREAK_VACUUM.value and self.height_provider is not None:
+            self.release_heights.append(float(self.height_provider()))
         return {"mode": value}
 
     def wait_transfer_ready(
@@ -544,6 +549,33 @@ class ConfigTests(unittest.TestCase):
             MainWindow._second_step_height_values("invalid", None),
         )
 
+    def test_txt_vision_transfer_repeat_builds_sequential_requests(self) -> None:
+        step = SimpleNamespace(
+            index=2,
+            type="vision_transfer",
+            values={"transfer_direction": "Y1_TO_Y2", "repeat": "3"},
+        )
+
+        requests_to_run = MainWindow._task_step_requests(None, step)
+
+        self.assertEqual(3, len(requests_to_run))
+        self.assertEqual(
+            [
+                "TXT step 2 vision_transfer repeat 1/3",
+                "TXT step 2 vision_transfer repeat 2/3",
+                "TXT step 2 vision_transfer repeat 3/3",
+            ],
+            [item[0] for item in requests_to_run],
+        )
+        self.assertTrue(
+            all(
+                path == "/flows/main-cycle/independent/second-step"
+                and payload == {"transfer_direction": "Y1_TO_Y2"}
+                for _label, path, payload, _timeout in requests_to_run
+            )
+        )
+        self.assertIn("repeat=3", MainWindow._task_step_summary(step))
+
     def test_main_cycle_waiting_phase_only_opens_confirmation_gate(self) -> None:
         calls: list[tuple[str, str | None]] = []
 
@@ -731,6 +763,61 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(response.data["home_postcheck"]["confirmed"])
         self.assertTrue(response.data["home_postcheck"]["arm_home_confirmed"])
         self.assertTrue(response.data["home_postcheck"]["camera_home_confirmed"])
+        self.assertFalse(FLOW_LOCK.locked())
+
+    def test_independent_second_step_keeps_home_and_skips_standby(self) -> None:
+        result = SimpleNamespace(
+            succeeded=True,
+            status=LifecycleStatus.SUCCESS,
+            state=MainCycleState.SUCCESS,
+            phase=MainCyclePhase.READY_FIRST_STEP,
+            step="step2_arm_home_confirmed",
+            message="done",
+            elapsed_seconds=0.1,
+            height_mm=460.0,
+            vision_height_mm=695.0,
+            transfer_direction="Y1_TO_Y2",
+        )
+        home_snapshot = SimpleNamespace(
+            all_home_confirmed=True,
+            as_dict=lambda: {"state": "home_confirmed", "reason": "flow complete"},
+        )
+        fake_interlock = SimpleNamespace(snapshot=home_snapshot)
+
+        with (
+            patch(
+                "api.main.ARM_VISION_WORKFLOW_SERVICE.move_home_component",
+                side_effect=[{"component": "arm"}, {"component": "camera"}],
+            ),
+            patch(
+                "api.main.ARM_VISION_WORKFLOW_SERVICE.confirm_home",
+                return_value={"confirmed": True},
+            ),
+            patch(
+                "api.main.ARM_VISION_WORKFLOW_SERVICE.move_standby_pose",
+                return_value={"pose": "STANDBY", "angles": {"ID142": 1.0}},
+            ) as move_standby,
+            patch(
+                "api.main.MAIN_CYCLE_FLOW.prepare_independent_second_step_height",
+                return_value=560.0,
+            ),
+            patch(
+                "api.main.MAIN_CYCLE_FLOW.run_independent_second_step",
+                return_value=result,
+            ),
+            patch("api.main.ARM_CAMERA_HOME_INTERLOCK", fake_interlock),
+        ):
+            response = run_independent_main_cycle_second_step(None)
+
+        self.assertTrue(response.ok)
+        move_standby.assert_not_called()
+        self.assertFalse(response.data["standby_pose_attempted"])
+        self.assertEqual("HOME", response.data["final_pose"])
+        self.assertEqual(
+            {"state": "home_confirmed", "reason": "flow complete"},
+            response.data["arm_camera_home"],
+        )
+        self.assertEqual(1450.0, response.data["effective_maximum_height_mm"])
         self.assertFalse(FLOW_LOCK.locked())
 
     def test_independent_api_prepares_safe_height_before_home_under_same_lock(self) -> None:
@@ -2375,14 +2462,20 @@ class FlowTests(unittest.TestCase):
     def test_main_cycle_runs_first_step_second_step_and_final_step(self) -> None:
         heights = (
             [560, 560, 560]
-            + [560, 560, 560, 620, 620, 620, 460, 460, 460, 620, 620, 620, 560, 560, 560]
+            + [
+                560, 560, 560,
+                620, 620, 620,
+                460, 460, 460, 460, 460, 460, 460,
+            ]
             + [560, 560, 560]
         )
         lift = FakeLiftDomainService(heights)
         pallet = FakePalletTransferDomainService()
         pallet.position_sequences["Y1"] = [0.0, 111.0, 111.0, 30.0, 0.0, 0.0]
         pallet.position_sequences["Y2"] = [0.0, 222.0, 222.0, 40.0, 0.0, 0.0]
-        middle = FakeMiddleVacuumDomainService()
+        middle = FakeMiddleVacuumDomainService(
+            lambda: lift.position_config[-1][0]
+        )
         vision = FakeVisionBridgeDomainService(620.0)
         flow = MainCycleFlow(
             lift,
@@ -2435,26 +2528,29 @@ class FlowTests(unittest.TestCase):
         self.assertGreaterEqual(pallet.calls.count("Y1:start_forward"), 2)
         self.assertGreaterEqual(pallet.calls.count("Y2:start_forward"), 2)
         self.assertEqual(["vacuum", "break_vacuum", "off", "off"], middle.modes)
+        self.assertEqual([460.0], middle.release_heights)
         self.assertIn("Y1:action=none", pallet.calls)
         self.assertIn("Y2:action=none", pallet.calls)
         self.assertEqual(
-            [560.0, 560.0, 620.0, 460.0, 620.0, 560.0, 560.0],
+            [560.0, 560.0, 620.0, 460.0, 560.0],
             [target for target, _speed in lift.position_config],
         )
-        self.assertEqual(7, lift.calls.count("start_vision_positioning"))
-        self.assertGreaterEqual(lift.calls.count("stop"), 7)
+        self.assertEqual(5, lift.calls.count("start_vision_positioning"))
+        self.assertGreaterEqual(lift.calls.count("stop"), 5)
 
         event_names = [name for name, _payload in vision.events]
         self.assertEqual("start", event_names[0])
         self.assertIn("vision_height_ready", event_names)
         self.assertIn("m54_on_after_height", event_names)
         self.assertIn("returned_cross_side_height_after_m54", event_names)
-        self.assertIn("m56_on_m54_off_after_same_height", event_names)
-        self.assertIn("returned_vision_height_after_m56", event_names)
+        self.assertIn("m56_on_m54_off_at_cross_side_height", event_names)
+        self.assertIn("held_cross_side_height_after_m56", event_names)
         m54_payload = dict(vision.events[event_names.index("m54_on_after_height")][1])
-        m56_payload = dict(vision.events[event_names.index("m56_on_m54_off_after_same_height")][1])
+        m56_payload = dict(
+            vision.events[event_names.index("m56_on_m54_off_at_cross_side_height")][1]
+        )
         self.assertEqual(620.0, m54_payload["height_mm"])
-        self.assertEqual(620.0, m56_payload["height_mm"])
+        self.assertEqual(460.0, m56_payload["height_mm"])
 
     def test_independent_first_step_can_repeat_without_advancing_guided_phase(self) -> None:
         lift = FakeLiftDomainService([560.0] * 6)
@@ -2491,8 +2587,6 @@ class FlowTests(unittest.TestCase):
             [560.0, 560.0, 560.0]
             + [620.0, 620.0, 620.0]
             + [460.0, 460.0, 460.0]
-            + [620.0, 620.0, 620.0]
-            + [560.0, 560.0, 560.0]
         )
         flow = MainCycleFlow(
             lift,
@@ -2686,11 +2780,11 @@ class FlowTests(unittest.TestCase):
             + [675, 675, 675]
             + [460, 460, 460]
             + [460, 460]
-            + [675, 675, 675]
-            + [560, 560, 560]
         )
         pallet = FakePalletTransferDomainService()
-        middle = FakeMiddleVacuumDomainService()
+        middle = FakeMiddleVacuumDomainService(
+            lambda: lift.position_config[-1][0]
+        )
         vision = FakeVisionBridgeDomainService(620.0)
 
         class SafetyCheckingArm(FakeArmVisionWorkflowDomainService):
@@ -2722,6 +2816,8 @@ class FlowTests(unittest.TestCase):
                     lift.position_config[-1][0]
                 )
                 self.calls.append("place_handoff_done")
+                if movement_handoff is not None:
+                    movement_handoff("fake arm return HOME")
                 return {
                     "depth_m": 0.78,
                     "plc_height_mm": self.height_mm,
@@ -2745,11 +2841,12 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(MainCycleState.SUCCESS, second.state)
         self.assertEqual(MainCyclePhase.WAITING_FINAL_STEP1, flow.phase)
         self.assertEqual(["run_pick_and_place", "pick_handoff_done", "place_handoff_done"], arm.calls)
-        self.assertEqual([460.0, 560.0], arm.safe_height_after_handoff)
+        self.assertEqual([460.0, 460.0], arm.safe_height_after_handoff)
         self.assertEqual(["vacuum", "break_vacuum", "off"], middle.modes)
+        self.assertEqual([460.0], middle.release_heights)
         self.assertEqual(["vacuum", "release"], middle.confirmations)
         self.assertEqual(
-            [560.0, 675.0, 460.0, 675.0, 560.0],
+            [560.0, 675.0, 460.0],
             [target for target, _speed in lift.position_config],
         )
         self.assertEqual(["RView"], arm.views)
@@ -2761,8 +2858,6 @@ class FlowTests(unittest.TestCase):
             + [675.0] * 3
             + [460.0] * 3
             + [460.0] * 2
-            + [675.0] * 3
-            + [560.0] * 3
         )
         arm = FakeArmVisionWorkflowDomainService(675.0)
         flow = MainCycleFlow(
@@ -2794,8 +2889,6 @@ class FlowTests(unittest.TestCase):
             [560.0] * 3
             + [695.0] * 3
             + [460.0] * 3
-            + [695.0] * 3
-            + [560.0] * 3
         )
         vision = FakeVisionBridgeDomainService(900.0)
         progress_messages: list[str] = []
@@ -2822,7 +2915,7 @@ class FlowTests(unittest.TestCase):
 
         self.assertEqual(MainCycleState.SUCCESS, second.state)
         targets = [target for target, _speed in lift.position_config]
-        self.assertEqual([560.0, 695.0, 460.0, 695.0, 560.0], targets)
+        self.assertEqual([560.0, 695.0, 460.0], targets)
         self.assertTrue(all(target <= 695.0 for target in targets))
         self.assertEqual(695.0, second.vision_height_mm)
         self.assertTrue(any("900mm" in message and "695mm" in message for message in progress_messages))
@@ -2834,7 +2927,14 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(560.0, event_payloads["vision_height_ready"]["vision_height_mm"])
         self.assertEqual(695.0, event_payloads["m54_on_after_height"]["height_mm"])
         self.assertEqual(460.0, event_payloads["returned_cross_side_height_after_m54"]["cross_side_height_mm"])
-        self.assertEqual(695.0, event_payloads["m56_on_m54_off_after_same_height"]["height_mm"])
+        self.assertEqual(
+            460.0,
+            event_payloads["m56_on_m54_off_at_cross_side_height"]["height_mm"],
+        )
+        self.assertEqual(
+            460.0,
+            event_payloads["held_cross_side_height_after_m56"]["cross_side_height_mm"],
+        )
         self.assertFalse(interlock.all_home_confirmed)
         self.assertEqual("not_home", interlock.snapshot.state.value)
 
@@ -2844,8 +2944,6 @@ class FlowTests(unittest.TestCase):
             + [695.0] * 3
             + [460.0] * 3
             + [460.0] * 2
-            + [695.0] * 3
-            + [560.0] * 3
         )
         arm = FakeArmVisionWorkflowDomainService(900.0)
         flow = MainCycleFlow(
@@ -2866,7 +2964,7 @@ class FlowTests(unittest.TestCase):
 
         self.assertEqual(MainCycleState.SUCCESS, second.state)
         targets = [target for target, _speed in lift.position_config]
-        self.assertEqual([560.0, 695.0, 460.0, 695.0, 560.0], targets)
+        self.assertEqual([560.0, 695.0, 460.0], targets)
         self.assertTrue(all(target <= 695.0 for target in targets))
         self.assertEqual(695.0, second.vision_height_mm)
 

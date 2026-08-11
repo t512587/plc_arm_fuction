@@ -58,20 +58,20 @@ SECOND_STEP_LABELS = {
     "step2_precheck": "檢查 PLC 與升降服務",
     "step2_to_vision_height": "升降機移動到 560mm 視覺高度",
     "step2_arm_vision_pick_place": "D435i／CANBus 手臂取放",
-    "step2_confirm_safe_height_before_arm_motion": "確認 560mm 後放行手臂",
+    "step2_confirm_safe_height_before_arm_motion": "確認目前動作所需安全高度後放行手臂",
     "step2_pick_height": "取料：升降與吸真空",
     "step2_safe_height_before_transfer": "換邊前：保持吸附並下降到 460mm",
     "step2_arm_transfer": "安全高度已確認：手臂換邊",
-    "step2_place_height": "放料：升降與破真空",
-    "step2_safe_height_before_home": "回 HOME 前：下降到 560mm",
+    "step2_place_height": "放料：保持 460mm 並切換破真空",
+    "step2_safe_height_before_home": "回 HOME 前：保持並確認 460mm",
     "step2_arm_return_home": "安全高度已確認：手臂返回 HOME",
     "step2_arm_home_confirmed": "四顆馬達 HOME 已確認",
     "step2_start_bridge": "啟動 RealSense／CANBus 橋接",
     "step2_wait_height": "等待辨識高度",
     "step2_m54_height": "移動到取料高度並開啟 M54",
-    "step2_return_after_m54": "取料後返回 560mm",
-    "step2_m56_same_height": "移動到實測放料高度並切換 M56",
-    "step2_return_after_m56": "放料後返回 560mm",
+    "step2_return_after_m54": "取料後返回並保持 460mm",
+    "step2_m56_cross_side_height": "保持 460mm 並切換 M54 OFF／M56 ON",
+    "step2_hold_cross_side_height_after_m56": "破真空後維持 460mm",
     "step2_wait_done": "等待 RealSense／CANBus 完成",
 }
 CJK_FONT_CANDIDATES = (
@@ -1781,13 +1781,16 @@ class MainWindow(tk.Tk):
                 )
             ]
         if step.type == "vision_transfer":
+            repeat = int(step.values.get("repeat", "1"))
             return [
                 (
-                    f"TXT step {step.index} vision_transfer",
+                    f"TXT step {step.index} vision_transfer repeat "
+                    f"{iteration}/{repeat}",
                     "/flows/main-cycle/independent/second-step",
                     {"transfer_direction": step.values["transfer_direction"]},
                     MAIN_CYCLE_SECOND_STEP_REQUEST_TIMEOUT_SECONDS,
                 )
+                for iteration in range(1, repeat + 1)
             ]
         if step.type == "home":
             target = step.values["target"]
@@ -1846,7 +1849,8 @@ class MainWindow(tk.Tk):
         if step.type == "vision_transfer":
             return (
                 f"{step.index}. vision_transfer "
-                f"direction={step.values.get('transfer_direction')}"
+                f"direction={step.values.get('transfer_direction')} "
+                f"repeat={step.values.get('repeat', '1')}"
             )
         if step.type == "home":
             return f"{step.index}. home target={step.values.get('target')}"
@@ -2819,8 +2823,8 @@ class MainWindow(tk.Tk):
             "start": "啟動 D435i／CANBus 手臂程式",
             "arm_output": "D435i／CANBus 手臂執行中",
             "height_precheck": "檢查辨識高度與 695mm 安全上限",
-            "waiting_safe_height": "等待升降機停止並確認 560mm",
-            "safe_height_confirmed": "560mm 已確認，準備放行手臂",
+            "waiting_safe_height": "等待升降機停止並確認目前動作安全高度",
+            "safe_height_confirmed": "安全高度已確認，準備放行手臂",
             "pick_handoff": "取料位置交接",
             "place_handoff": "放料位置交接",
             "cancelling": "正在要求四顆 CAN 馬達停止",

@@ -114,18 +114,3 @@ services:
     home_timeout_seconds: 15.0
     home_poll_interval_seconds: 0.2
     cancel_stop_timeout_seconds: 8.0
-
-  # Command-line LView left-to-right automatic task parameters.
-  auto_transfer:
-    lowest_height_mm: 0.0
-    arm_safe_height_mm: 560.0
-    cross_side_safe_height_mm: 460.0
-    height_tolerance_mm: 1.0
-    position_tolerance_mm: 1.0
-    stable_reads: 2
-    poll_interval_seconds: 0.1
-    lift_timeout_seconds: 30.0
-    pallet_timeout_seconds: 120.0
-    pallet_action_delay_seconds: 3.0
-    release_hold_seconds: 10.0
-    release_retract_speed: 100.0
