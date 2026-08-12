@@ -93,7 +93,7 @@ ROI_BY_VIEW = {
     "LView": (202, 117, 460, 312),
 
     # RView ROI placeholder. Measure/adjust this before RView calibration.
-    "RView": (210, 186, 460, 312),
+    "RView": (210, 186, 460, 380),
 }
 
 # RealSense camera intrinsics are read at runtime from capture_realsense_frame().
@@ -554,40 +554,107 @@ def wait_until_named_pose(
         for label in motor_labels
     }
 
+    return wait_until_target_angles(
+        controller,
+        point_name,
+        targets,
+        tolerance_degrees=tolerance_degrees,
+        stable_reads=stable_reads,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+def wait_until_target_angles(
+    controller: ArmController,
+    target_name: str,
+    targets: dict[str, float],
+    *,
+    tolerance_degrees: float,
+    stable_reads: int,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> dict[str, float]:
+    """Confirm arbitrary CAN targets with stable readback from every target axis."""
+    if tolerance_degrees < 0:
+        raise ValueError("tolerance_degrees must not be negative")
+    if stable_reads <= 0:
+        raise ValueError("stable_reads must be greater than zero")
+    if timeout_seconds <= 0 or poll_interval_seconds <= 0:
+        raise ValueError("pose confirmation timing must be greater than zero")
+    if not targets:
+        raise ValueError("pose confirmation requires at least one motor target")
+
     consecutive = 0
     deadline = time.monotonic() + timeout_seconds
     last_angles: dict[str, float] = {}
+    last_errors: dict[str, float] = {}
+    missing_readbacks: list[str] = []
     while True:
         last_angles = read_current_angles(controller)
         missing_readbacks = [
-            label for label in motor_labels if label not in last_angles
+            label for label in targets if label not in last_angles
         ]
-        errors = {
+        last_errors = {
             label: abs(last_angles[label] - targets[label])
-            for label in motor_labels
+            for label in targets
             if label in last_angles
         }
         within_tolerance = (
             not missing_readbacks
-            and all(error <= tolerance_degrees for error in errors.values())
+            and all(error <= tolerance_degrees for error in last_errors.values())
         )
         consecutive = consecutive + 1 if within_tolerance else 0
         print(
-            f"[POSE_CHECK] {point_name} stable={consecutive}/{stable_reads} "
-            f"missing={missing_readbacks} errors={errors}",
+            f"[POSE_CHECK] {target_name} stable={consecutive}/{stable_reads} "
+            f"missing={missing_readbacks} errors={last_errors}",
             flush=True,
         )
         if consecutive >= stable_reads:
             return {
                 label: float(last_angles[label])
-                for label in motor_labels
+                for label in targets
             }
         if time.monotonic() >= deadline:
+            detail = {
+                label: {
+                    "target": float(target),
+                    "actual": last_angles.get(label),
+                    "error": last_errors.get(label),
+                }
+                for label, target in targets.items()
+            }
             raise TimeoutError(
-                f"{point_name} was not confirmed within {timeout_seconds:g}s; "
-                f"last_angles={last_angles}"
+                f"{target_name} was not confirmed within {timeout_seconds:g}s; "
+                f"missing={missing_readbacks}; motors={detail}"
             )
         time.sleep(poll_interval_seconds)
+
+
+def confirm_target_angles(
+    controller: ArmController,
+    target_name: str,
+    targets: dict[str, float],
+    *,
+    tolerance_degrees: float,
+    stable_reads: int,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> dict[str, float]:
+    """Confirm a route target and stop all axes if any target fails to settle."""
+    try:
+        return wait_until_target_angles(
+            controller,
+            target_name,
+            targets,
+            tolerance_degrees=tolerance_degrees,
+            stable_reads=stable_reads,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+    except Exception:
+        stop_all_motors_confirmed(controller)
+        raise
 
 
 def confirm_home_pose(
@@ -735,20 +802,26 @@ def move_named_pose(
             f"{point_name} 缺少馬達角度：{', '.join(missing)}"
         )
 
-    safe_go_to_point(
-        controller,
-        point_name,
-        settle_sec,
-    )
+    try:
+        safe_go_to_point(
+            controller,
+            point_name,
+            settle_sec,
+        )
 
-    angles = wait_until_named_pose(
-        controller,
-        point_name,
-        tolerance_degrees=tolerance_degrees,
-        stable_reads=stable_reads,
-        timeout_seconds=timeout_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-    )
+        angles = wait_until_named_pose(
+            controller,
+            point_name,
+            tolerance_degrees=tolerance_degrees,
+            stable_reads=stable_reads,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+    except Exception:
+        # A synchronized batch may already have started some or all axes.
+        # Best-effort stop all four before reporting a failed/timeout pose.
+        stop_all_motors_confirmed(controller)
+        raise
 
     print(NAMED_POSE_CONFIRMED_MARKER, flush=True)
     print(
@@ -1474,7 +1547,15 @@ def run_post_detection_pick_flow(
 
     print(f"[FLOW] Enter pre-grasp safe pose ({pregrasp_point})")
     step_pause(f"Move HOME → {pregrasp_point}", auto_step, 0.5)
-    safe_go_to_point(controller, pregrasp_point, settle_sec)
+    move_named_pose(
+        controller,
+        pregrasp_point,
+        settle_sec=settle_sec,
+        tolerance_degrees=home_tolerance_degrees,
+        stable_reads=home_stable_reads,
+        timeout_seconds=home_timeout_seconds,
+        poll_interval_seconds=home_poll_interval_seconds,
+    )
 
     step_pause(
         f"Move {pregrasp_point} → predicted {pick_side} suction target. "
@@ -1488,6 +1569,15 @@ def run_post_detection_pick_flow(
         target_angles=target_angles,
         target_speed_dps=target_speed_dps,
         settle_sec=target_wait_sec,
+    )
+    confirm_target_angles(
+        controller,
+        f"{pick_side.upper()}_SUCTION_TARGET",
+        target_angles,
+        tolerance_degrees=home_tolerance_degrees,
+        stable_reads=home_stable_reads,
+        timeout_seconds=home_timeout_seconds,
+        poll_interval_seconds=home_poll_interval_seconds,
     )
 
     print(f"\n[HANDOFF] Arm is at {pick_side} target suction position.")
@@ -1512,6 +1602,15 @@ def run_post_detection_pick_flow(
             right_angles=transfer_angles,
             target_speed_dps=target_speed_dps,
             settle_sec=settle_sec,
+        )
+        confirm_target_angles(
+            controller,
+            "RIGHT_PLACE_TARGET",
+            transfer_angles,
+            tolerance_degrees=home_tolerance_degrees,
+            stable_reads=home_stable_reads,
+            timeout_seconds=home_timeout_seconds,
+            poll_interval_seconds=home_poll_interval_seconds,
         )
 
         print("\n[HANDOFF] Arm is at right outer-branch place position.")
@@ -1545,6 +1644,15 @@ def run_post_detection_pick_flow(
             left_angles=transfer_angles,
             target_speed_dps=target_speed_dps,
             settle_sec=settle_sec,
+        )
+        confirm_target_angles(
+            controller,
+            "LEFT_PLACE_TARGET",
+            transfer_angles,
+            tolerance_degrees=home_tolerance_degrees,
+            stable_reads=home_stable_reads,
+            timeout_seconds=home_timeout_seconds,
+            poll_interval_seconds=home_poll_interval_seconds,
         )
 
         print("\n[HANDOFF] Arm is at left outer-branch place position.")
@@ -1840,7 +1948,15 @@ def main() -> None:
                 poll_interval_seconds=args.home_poll,
                 final_confirmation=False,
             )
-            safe_go_to_point(controller, view, args.settle)
+            move_named_pose(
+                controller,
+                view,
+                settle_sec=args.settle,
+                tolerance_degrees=args.home_tolerance,
+                stable_reads=args.home_stable_reads,
+                timeout_seconds=args.home_timeout,
+                poll_interval_seconds=args.home_poll,
+            )
 
         # ==============================================================
         # Vision pipeline (always runs)

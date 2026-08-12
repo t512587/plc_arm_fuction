@@ -1,10 +1,10 @@
 # TXT task example.
 # Supported type values:
-#   pallet, vision_transfer, home, wait, confirm
+#   pallet, vision_transfer, home, wait, confirm, arm_pose
 
 step
-type=home
-target=all
+type=arm_pose
+pose=HOME
 
 step
 type=pallet

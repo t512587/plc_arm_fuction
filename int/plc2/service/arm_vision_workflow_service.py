@@ -178,7 +178,12 @@ class ArmVisionWorkflowService(LifecycleTracked):
     def enabled(self) -> bool:
         return self.config.enabled
 
-    def depth_m_to_plc_height_mm(self, depth_m: float) -> float:
+    def depth_m_to_plc_height_mm(
+        self,
+        depth_m: float,
+        *,
+        height_reference_depth_mm: float | None = None,
+    ) -> float:
         depth_m = float(depth_m)
         if not math.isfinite(depth_m):
             raise ArmVisionWorkflowServiceError(
@@ -187,9 +192,19 @@ class ArmVisionWorkflowService(LifecycleTracked):
             )
         if depth_m <= self.config.height_formula_minimum_depth_m:
             return min(depth_m * 1000.0, ARM_VISION_MAXIMUM_PLC_HEIGHT_MM)
+        reference_mm = (
+            self.config.height_reference_depth_mm
+            if height_reference_depth_mm is None
+            else float(height_reference_depth_mm)
+        )
+        if not math.isfinite(reference_mm) or reference_mm <= 0:
+            raise ArmVisionWorkflowServiceError(
+                "height",
+                f"height_reference_depth_mm 必須是大於 0 的有限數值: {reference_mm!r}",
+            )
         height_mm = (
             depth_m * 1000.0
-            - self.config.height_reference_depth_mm
+            - reference_mm
             + self.config.vision_height_mm
         )
         if not math.isfinite(height_mm):
@@ -461,16 +476,23 @@ class ArmVisionWorkflowService(LifecycleTracked):
             )
             raise
             
-    def move_standby_pose(
+    def move_named_pose(
         self,
         pose_name: str = "STANDBY",
     ) -> dict[str, Any]:
-        """移動四顆 CAN 馬達到預設待機姿態並確認到位。"""
+        """Move all four CAN axes to an allowed named pose and confirm it."""
+
+        pose_name = str(pose_name).strip().upper()
+        if pose_name not in {"HOME", "STANDBY"}:
+            raise ArmVisionWorkflowServiceError(
+                "move_named_pose",
+                f"不支援的四軸姿態：{pose_name!r}",
+            )
 
         if not self.enabled:
             raise ArmVisionWorkflowServiceError(
-                "move_standby_pose",
-                "手臂待機姿態控制目前未啟用",
+                "move_named_pose",
+                "手臂四軸姿態控制目前未啟用",
             )
 
         command = self._named_pose_command(pose_name)
@@ -482,12 +504,12 @@ class ArmVisionWorkflowService(LifecycleTracked):
         )
 
         self.home_interlock.mark_not_home(
-            f"正在移動到待機姿態 {pose_name}"
+            f"正在同步移動四軸到 {pose_name}"
         )
         self._set_status(
             LifecycleStatus.RUNNING,
-            "move_standby_pose",
-            f"正在移動並確認待機姿態 {pose_name}",
+            "move_named_pose",
+            f"正在同步移動並確認四軸姿態 {pose_name}",
             command=" ".join(command),
         )
 
@@ -514,7 +536,7 @@ class ArmVisionWorkflowService(LifecycleTracked):
 
             if completed.returncode != 0:
                 raise ArmVisionWorkflowServiceError(
-                    "move_standby_pose",
+                    "move_named_pose",
                     f"{pose_name} 程式結束碼 "
                     f"{completed.returncode}；"
                     f"{self._last_output_text(lines)}",
@@ -522,7 +544,7 @@ class ArmVisionWorkflowService(LifecycleTracked):
 
             if NAMED_POSE_CONFIRMED_MARKER not in lines:
                 raise ArmVisionWorkflowServiceError(
-                    "move_standby_pose",
+                    "move_named_pose",
                     f"沒有收到 {pose_name} 姿態確認標記；"
                     f"{self._last_output_text(lines)}",
                 )
@@ -541,25 +563,30 @@ class ArmVisionWorkflowService(LifecycleTracked):
             angles = pose_data.get("angles")
             if not isinstance(angles, dict) or not angles:
                 raise ArmVisionWorkflowServiceError(
-                    "move_standby_pose",
+                    "move_named_pose",
                     f"{pose_name} 已確認，但沒有收到角度資料",
                 )
 
-            self.home_interlock.mark_not_home(
-                f"四軸已位於待機姿態 {pose_name}"
-            )
+            if pose_name == "HOME":
+                self.home_interlock.mark_home_confirmed(
+                    "ID142～ID145 已同步回到並穩定確認 HOME"
+                )
+            else:
+                self.home_interlock.mark_not_home(
+                    f"四軸已位於待機姿態 {pose_name}"
+                )
 
             result = {
                 "pose": pose_name,
                 "confirmed": True,
                 "angles": angles,
-                "all_home_confirmed": False,
+                "all_home_confirmed": pose_name == "HOME",
             }
 
             self._set_status(
                 LifecycleStatus.SUCCESS,
-                "move_standby_pose",
-                f"待機姿態 {pose_name} 已確認",
+                "move_named_pose",
+                f"四軸姿態 {pose_name} 已確認",
                 **result,
             )
 
@@ -567,29 +594,37 @@ class ArmVisionWorkflowService(LifecycleTracked):
 
         except subprocess.TimeoutExpired as exc:
             error = ArmVisionWorkflowServiceError(
-                "move_standby_pose",
+                "move_named_pose",
                 f"{pose_name} 移動超過 "
                 f"{timeout_seconds:g} 秒",
             )
             self.home_interlock.mark_unknown(str(error))
             self._set_status(
                 LifecycleStatus.TIMEOUT,
-                "move_standby_pose",
+                "move_named_pose",
                 str(error),
             )
             raise error from exc
 
         except Exception as exc:
             self.home_interlock.mark_unknown(
-                f"{pose_name} 待機姿態失敗："
+                f"{pose_name} 四軸姿態失敗："
                 f"{type(exc).__name__}: {exc}"
             )
             self._set_status(
                 LifecycleStatus.ERROR,
-                "move_standby_pose",
+                "move_named_pose",
                 str(exc),
             )
-            raise     
+            raise
+
+    def move_standby_pose(
+        self,
+        pose_name: str = "STANDBY",
+    ) -> dict[str, Any]:
+        """Backward-compatible wrapper for existing startup/manual callers."""
+
+        return self.move_named_pose(pose_name)
 
     def run_pick_and_place(
         self,
@@ -599,10 +634,19 @@ class ArmVisionWorkflowService(LifecycleTracked):
         place_handoff: ArmHandoff,
         movement_handoff: ArmMovementHandoff | None = None,
         view: str | None = None,
+        height_reference_depth_mm: float | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             raise ArmVisionWorkflowServiceError("run", "手臂視覺流程目前未啟用")
+
+        if height_reference_depth_mm is not None:
+            reference_mm = float(height_reference_depth_mm)
+            if not math.isfinite(reference_mm) or reference_mm <= 0:
+                raise ArmVisionWorkflowServiceError(
+                    "run",
+                    "height_reference_depth_mm 必須是大於 0 的有限數值",
+                )
 
         selected_view = self.config.view if view is None else str(view)
         if selected_view not in {"LView", "RView"}:
@@ -825,7 +869,10 @@ class ArmVisionWorkflowService(LifecycleTracked):
                 if "[INFO] Saved control_target.json" in line and not target_prechecked:
                     control_target = self._load_control_target(target_file, started_at)
                     depth_m = float(control_target["depth_m"])
-                    height_mm = self.depth_m_to_plc_height_mm(depth_m)
+                    height_mm = self.depth_m_to_plc_height_mm(
+                        depth_m,
+                        height_reference_depth_mm=height_reference_depth_mm,
+                    )
                     if self.target_height_validator is not None:
                         self.target_height_validator(height_mm)
                     target_prechecked = True
@@ -851,7 +898,10 @@ class ArmVisionWorkflowService(LifecycleTracked):
                 if pick_marker in line and not pick_done:
                     control_target = self._load_control_target(target_file, started_at)
                     depth_m = float(control_target["depth_m"])
-                    height_mm = self.depth_m_to_plc_height_mm(depth_m)
+                    height_mm = self.depth_m_to_plc_height_mm(
+                        depth_m,
+                        height_reference_depth_mm=height_reference_depth_mm,
+                    )
                     if self.target_height_validator is not None:
                         self.target_height_validator(height_mm)
                     report(
@@ -872,7 +922,10 @@ class ArmVisionWorkflowService(LifecycleTracked):
                 if place_marker in line and not place_done:
                     control_target = result.get("control_target") or self._load_control_target(target_file, started_at)
                     depth_m = float(control_target["depth_m"])
-                    height_mm = self.depth_m_to_plc_height_mm(depth_m)
+                    height_mm = self.depth_m_to_plc_height_mm(
+                        depth_m,
+                        height_reference_depth_mm=height_reference_depth_mm,
+                    )
                     report(
                         "place_handoff",
                         f"{place_side} 側放料交接：{self._height_policy_text(depth_m, height_mm)}",

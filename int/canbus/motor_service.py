@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+import hashlib
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,8 @@ class MotorService:
         self.last_tx = ""
         self.last_rx = ""
         self.connection_step = "idle"
+        self._channel_lock_file: Any | None = None
+        self._channel_lock_path: Path | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -67,40 +72,113 @@ class MotorService:
 
     def connect(self) -> str:
         self.connection_step = "connect start"
-        if self.config.can_interface == "canusb_cli":
-            return self._connect_canusb_cli()
-        if self.config.can_interface == "waveshare_usbcana":
-            return self._connect_waveshare_usbcana()
-
-        if can is None:
-            raise RuntimeError("python-can is not installed. Run: pip install -r requirements.txt")
         if self.is_connected:
             return f"Already connected to CAN channel {self.config.channel}."
+        self._acquire_channel_lock()
+        try:
+            if self.config.can_interface == "canusb_cli":
+                return self._connect_canusb_cli()
+            if self.config.can_interface == "waveshare_usbcana":
+                return self._connect_waveshare_usbcana()
 
-        self.connection_step = "opening CAN bus"
-        self._bus = can.Bus(
-            interface=self.config.can_interface,
-            channel=self.config.channel,
-            bitrate=self.config.bitrate,
-            **self.config.can_kwargs,
-        )
-        self.connection_step = "connected"
-        return (
-            f"Connected to CAN channel {self.config.channel}; "
-            f"interface={self.config.can_interface}; bitrate={self.config.bitrate}."
-        )
+            if can is None:
+                raise RuntimeError("python-can is not installed. Run: pip install -r requirements.txt")
+
+            self.connection_step = "opening CAN bus"
+            self._bus = can.Bus(
+                interface=self.config.can_interface,
+                channel=self.config.channel,
+                bitrate=self.config.bitrate,
+                **self.config.can_kwargs,
+            )
+            self.connection_step = "connected"
+            return (
+                f"Connected to CAN channel {self.config.channel}; "
+                f"interface={self.config.can_interface}; bitrate={self.config.bitrate}."
+            )
+        except Exception:
+            # A backend may have opened the serial/CAN handle before its
+            # configuration failed. Release both the device and ownership lock
+            # so a retry does not inherit a half-open connection.
+            try:
+                if self._bus:
+                    self._bus.shutdown()
+                    self._bus = None
+                if self._serial:
+                    self._serial.close()
+                    self._serial = None
+            finally:
+                self._release_channel_lock()
+            raise
 
     def disconnect(self) -> str:
-        if self.config.can_interface == "canusb_cli":
-            self._bus = None
-        elif self._bus:
-            self._bus.shutdown()
-            self._bus = None
-        if self._serial:
-            self._serial.close()
-            self._serial = None
-        self.connection_step = "disconnected"
-        return "Disconnected."
+        try:
+            if self.config.can_interface == "canusb_cli":
+                self._bus = None
+            elif self._bus:
+                self._bus.shutdown()
+                self._bus = None
+            if self._serial:
+                self._serial.close()
+                self._serial = None
+            self.connection_step = "disconnected"
+            return "Disconnected."
+        finally:
+            self._release_channel_lock()
+
+    def _acquire_channel_lock(self) -> None:
+        """Prevent two local processes from controlling one CAN channel."""
+        if self._channel_lock_file is not None:
+            return
+        channel = str(self.config.channel)
+        if os.name == "nt":
+            channel = channel.casefold()
+        identity = f"{self.config.can_interface}|{channel}".encode("utf-8")
+        digest = hashlib.sha256(identity).hexdigest()[:20]
+        path = Path(tempfile.gettempdir()) / f"plc_arm_can_{digest}.lock"
+        handle = path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError) as exc:
+            handle.close()
+            raise RuntimeError(
+                "CAN channel is already in use by another local process: "
+                f"{self.config.channel}. Close 2motor_sync.py, d435_control.py, "
+                "or the other action_main.py instance before retrying."
+            ) from exc
+        self._channel_lock_file = handle
+        self._channel_lock_path = path
+
+    def _release_channel_lock(self) -> None:
+        handle = self._channel_lock_file
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+            self._channel_lock_file = None
+            self._channel_lock_path = None
 
     def read_pid_parameter(self, index: int) -> dict[str, Any]:
         return self.read_pid_parameter_for_motor(self.config.motor_id, index)

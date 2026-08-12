@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Any, Protocol
 
 try:
@@ -37,6 +38,7 @@ class PalletTransferServiceError(RuntimeError):
 class PalletSlotConfig:
     forward_target_point: str
     forward_command_point: str
+    speed_point: str | None
     position_point: str
     vacuum_point: str
     break_vacuum_point: str
@@ -61,6 +63,11 @@ class PalletTransferServiceConfig:
                 str(slot): PalletSlotConfig(
                     forward_target_point=str(item["forward_target_point"]),
                     forward_command_point=str(item["forward_command_point"]),
+                    speed_point=(
+                        None
+                        if item.get("speed_point") in {None, ""}
+                        else str(item["speed_point"])
+                    ),
                     position_point=str(item["position_point"]),
                     vacuum_point=str(item["vacuum_point"]),
                     break_vacuum_point=str(item["break_vacuum_point"]),
@@ -105,6 +112,14 @@ class PalletTransferService(LifecycleTracked):
             position = self.plc_service.get_point(item.position_point)
             if str(position.device).upper() != "D":
                 raise PalletTransferServiceError("precheck", "位置回授必須是 D 點", point_id=item.position_point)
+            if item.speed_point is not None:
+                speed = self.plc_service.get_point(item.speed_point)
+                if str(speed.device).upper() != "D" or not speed.writable:
+                    raise PalletTransferServiceError(
+                        "precheck",
+                        "前進速度必須是可寫 D 點",
+                        point_id=item.speed_point,
+                    )
             for point_id in (
                 item.forward_command_point,
                 item.vacuum_point,
@@ -124,6 +139,37 @@ class PalletTransferService(LifecycleTracked):
                 point_id=item.forward_target_point,
             )
         self.plc_service.write_point(item.forward_target_point, forward_mm)
+
+    @tracked_operation("set_forward_speed", "寫入貨盤前進速度", "貨盤前進速度寫入並讀回完成")
+    def set_forward_speed(self, slot: str, speed: float) -> None:
+        item = self._slot(slot)
+        if item.speed_point is None:
+            raise PalletTransferServiceError(
+                "set_forward_speed",
+                f"{slot} 沒有設定獨立速度點位",
+            )
+        speed = float(speed)
+        if not math.isfinite(speed) or not 1 <= speed <= 32767:
+            raise PalletTransferServiceError(
+                "set_forward_speed",
+                f"速度 {speed!r} 必須介於 1～32767",
+                point_id=item.speed_point,
+            )
+        try:
+            self.plc_service.write_point(item.speed_point, speed)
+            readback = float(self.plc_service.read_point(item.speed_point))
+        except Exception as exc:
+            raise PalletTransferServiceError(
+                "set_forward_speed",
+                str(exc),
+                point_id=item.speed_point,
+            ) from exc
+        if readback != float(speed):
+            raise PalletTransferServiceError(
+                "set_forward_speed",
+                f"速度寫入後讀回不一致：要求 {speed:g}，讀回 {readback:g}",
+                point_id=item.speed_point,
+            )
 
     @tracked_operation(
         "start_forward",

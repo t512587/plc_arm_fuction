@@ -82,7 +82,13 @@ class ArmController:
         return result
 
     def go_to_point(self, point_name: str, current_positions: dict[str, float] | None = None) -> dict:
-        """Move all motors to a named point position.
+        """Move all motors to a named point, then let the caller confirm it.
+
+        Every motor command waits only for its immediate CAN acknowledgement;
+        it does not wait for that motor to finish moving before sending the
+        next command. This keeps one coordinated pose stage while avoiding the
+        Waveshare serial adapter's unreliable back-to-back no-wait burst, which
+        can route one target to the following motor.
 
         Args:
             point_name: Name of the point in point_config.json
@@ -92,25 +98,47 @@ class ArmController:
         if not angles:
             return {"error": f"{point_name} position not found in point_config.json"}
 
+        missing_targets = [label for label in MOTORS if label not in angles]
+        if missing_targets:
+            return {
+                "error": (
+                    f"{point_name} is missing motor targets: "
+                    + ", ".join(missing_targets)
+                )
+            }
+
+        # A named four-axis pose is all-or-none: read and validate every current
+        # angle before dispatching any motion command.
+        if current_positions is None:
+            read_result = self.read_positions()
+            current_positions = {
+                label: float(value)
+                for label, value in read_result.get("_updates", {}).items()
+            }
+        missing_positions = [
+            label for label in MOTORS if label not in current_positions
+        ]
+        if missing_positions:
+            return {
+                "error": (
+                    "Required motors not online: "
+                    + ", ".join(missing_positions)
+                )
+            }
+
         # Safety check: verify no motor moves more than MAX_MOVE_DEGREES
-        if current_positions:
-            for label in MOTORS:
-                if label not in angles:
-                    continue
-                current = current_positions.get(label)
-                if current is None:
-                    continue
-                target = angles[label]
-                diff = abs(target - current)
-                if diff > MAX_MOVE_DEGREES:
-                    return {
-                        "safety": (
-                            f"BLOCKED. {label} would move {diff:.1f}° "
-                            f"(current={current:.2f} -> target={target:.2f}). "
-                            f"Max allowed is {MAX_MOVE_DEGREES}°. "
-                            f"Read Current Positions first to verify angles."
-                        )
-                    }
+        for label in MOTORS:
+            current = current_positions[label]
+            target = angles[label]
+            diff = abs(target - current)
+            if diff > MAX_MOVE_DEGREES:
+                return {
+                    "safety": (
+                        f"BLOCKED. {label} would move {diff:.1f}° "
+                        f"(current={current:.2f} -> target={target:.2f}). "
+                        f"Max allowed is {MAX_MOVE_DEGREES}°."
+                    )
+                }
 
         # Safety check: verify target angles are within per-motor limits
         limit_error = self._check_angle_limits(angles)
@@ -121,21 +149,28 @@ class ArmController:
         result = {}
         updates = {}
         for label, motor_id in MOTORS.items():
-            if label not in angles:
-                result[label] = f"SKIP no {point_name} angle defined"
-                continue
             target = angles[label]
             try:
-                response = self.service.absolute_position_control(motor_id, target, speed)
+                response = self.service.absolute_position_control(
+                    motor_id, target, speed
+                )
                 result[f"{label} TX"] = response.get("tx", "")
                 result[label] = (
-                    f"OK {point_name} target={target:.2f} degree={response['degree']} "
-                    f"speed={response['speed_dps']} raw={response['raw']}"
+                    f"OK acknowledged {point_name} target={target:.2f} "
+                    f"speed={speed} raw={response['raw']}"
                 )
                 updates[label] = f"{target:.2f}"
             except Exception as exc:
                 result[f"{label} TX"] = self.service.last_tx
                 result[label] = f"ERROR {point_name} target={target:.2f} {type(exc).__name__}: {exc}"
+                result["_stop_after_error"] = self.stop_all()
+                for pending_label in MOTORS:
+                    if pending_label not in updates and pending_label != label:
+                        result.setdefault(
+                            pending_label,
+                            "SKIP pose movement aborted after CAN error",
+                        )
+                break
         result["_updates"] = updates
         return result
 

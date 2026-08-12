@@ -46,6 +46,7 @@ class LiftServiceProtocol(Protocol):
 class PalletTransferServiceProtocol(Protocol):
     def precheck(self) -> None: ...
     def set_forward_position(self, slot: str, forward_mm: float) -> None: ...
+    def set_forward_speed(self, slot: str, speed: float) -> None: ...
     def start_forward(self, slot: str) -> None: ...
     def stop_forward(self, slot: str | None = None) -> None: ...
     def read_forward_commands(self) -> dict[str, bool]: ...
@@ -87,6 +88,7 @@ class ArmVisionWorkflowServiceProtocol(Protocol):
         place_handoff: Callable[[float, dict], None],
         movement_handoff: Callable[[str], None] | None = None,
         view: str | None = None,
+        height_reference_depth_mm: float | None = None,
         progress_callback: Callable[[str], None] | None = None,
     ) -> dict: ...
 
@@ -150,6 +152,8 @@ class Step1Command:
     action: str
     height_mm: float
     forward_mm: float | None = None
+    x_speed: int | None = None
+    y1_speed: int | None = None
 
     def normalized_slot(self) -> str:
         return self.slot.strip().upper()
@@ -172,6 +176,9 @@ class Step1Command:
             raise ValueError("選擇 Y1/Y2 時，動作不可是 none")
         if not self.is_pause and self.forward_mm is None:
             raise ValueError("吸/推流程需要輸入 D510/D560 前進距離")
+        for name, value in (("x_speed", self.x_speed), ("y1_speed", self.y1_speed)):
+            if value is not None and not 1 <= value <= 32767:
+                raise ValueError(f"{name} 必須介於 1～32767")
 
 
 @dataclass(frozen=True)
@@ -325,6 +332,8 @@ class MainCycleFlow(LifecycleTracked):
         progress_callback: Callable[[MainCycleProgress], None] | None = None,
         *,
         transfer_direction: TransferDirection | str = TransferDirection.Y1_TO_Y2,
+        x_speed: int | None = None,
+        height_reference_depth_mm: float | None = None,
     ) -> MainCycleResult:
         if self.phase is not MainCyclePhase.WAITING_STEP2:
             return self._instant_error("second_step", f"目前階段是 {self.phase.value}，不能執行第二步")
@@ -332,7 +341,13 @@ class MainCycleFlow(LifecycleTracked):
             direction = TransferDirection.parse(transfer_direction)
         except ValueError as exc:
             return self._instant_error("second_step_direction", str(exc))
-        result = self._run_step2(cancel_event, progress_callback, direction)
+        result = self._run_step2(
+            cancel_event,
+            progress_callback,
+            direction,
+            x_speed=x_speed,
+            height_reference_depth_mm=height_reference_depth_mm,
+        )
         if result.succeeded:
             self.phase = MainCyclePhase.WAITING_FINAL_STEP1
             result = replace(result, phase=self.phase)
@@ -382,6 +397,8 @@ class MainCycleFlow(LifecycleTracked):
         progress_callback: Callable[[MainCycleProgress], None] | None = None,
         *,
         transfer_direction: TransferDirection | str = TransferDirection.Y1_TO_Y2,
+        x_speed: int | None = None,
+        height_reference_depth_mm: float | None = None,
     ) -> MainCycleResult:
         """Run the second block without requiring or advancing a guided phase."""
 
@@ -389,12 +406,20 @@ class MainCycleFlow(LifecycleTracked):
             direction = TransferDirection.parse(transfer_direction)
         except ValueError as exc:
             return self._instant_error("independent_second_step_direction", str(exc))
-        return self._run_step2(cancel_event, progress_callback, direction)
+        return self._run_step2(
+            cancel_event,
+            progress_callback,
+            direction,
+            x_speed=x_speed,
+            height_reference_depth_mm=height_reference_depth_mm,
+        )
 
     def prepare_independent_second_step_height(
         self,
         cancel_event: threading.Event,
         progress_callback: Callable[[MainCycleProgress], None] | None = None,
+        *,
+        x_speed: int | None = None,
     ) -> float:
         """Move to the fixed 560mm arm-safe height before the HOME precheck.
 
@@ -440,7 +465,12 @@ class MainCycleFlow(LifecycleTracked):
         )
         try:
             self.lift_service.precheck()
-            height = self._move_height(target_height_mm, cancel_event, report)
+            height = self._move_height(
+                target_height_mm,
+                cancel_event,
+                report,
+                speed=x_speed,
+            )
             height = self._confirm_stopped_height(
                 target_height_mm,
                 cancel_event,
@@ -585,7 +615,12 @@ class MainCycleFlow(LifecycleTracked):
                 return result(MainCycleState.SUCCESS, f"{label} 已選 none，流程暫停/略過", LifecycleStatus.SUCCESS)
 
             step = "step1_move_height"
-            height = self._move_height(command.height_mm, cancel_event, lambda message: report(f"{label}：{message}"))
+            height = self._move_height(
+                command.height_mm,
+                cancel_event,
+                lambda message: report(f"{label}：{message}"),
+                speed=command.x_speed,
+            )
 
             step = "step1_pallet_action"
             slot = command.normalized_slot()
@@ -593,6 +628,9 @@ class MainCycleFlow(LifecycleTracked):
             forward_mm = float(command.forward_mm)
             report(f"{label}：寫入 {slot} 前進距離 {forward_mm:g}mm")
             self.pallet_service.set_forward_position(slot, forward_mm)
+            if slot == "Y1" and command.y1_speed is not None:
+                report(f"{label}：寫入並確認 Y1 前進速度 {command.y1_speed}")
+                self.pallet_service.set_forward_speed(slot, command.y1_speed)
             self.pallet_service.start_forward(slot)
             output_slot = (
                 "Y2" if slot == "Y1" else "Y1"
@@ -643,6 +681,8 @@ class MainCycleFlow(LifecycleTracked):
                 return result(MainCycleState.CANCELLED, f"{label} 已取消", LifecycleStatus.CANCELLED)
             self.pallet_service.stop_forward(slot)
             self.pallet_service.set_forward_position(slot, 0.0)
+            if slot == "Y1" and command.y1_speed is not None:
+                self.pallet_service.set_forward_speed(slot, command.y1_speed)
             self.pallet_service.start_forward(slot)
 
             step = "step1_wait_y_position"
@@ -686,6 +726,9 @@ class MainCycleFlow(LifecycleTracked):
         cancel_event: threading.Event,
         progress_callback: Callable[[MainCycleProgress], None] | None,
         transfer_direction: TransferDirection,
+        *,
+        x_speed: int | None = None,
+        height_reference_depth_mm: float | None = None,
     ) -> MainCycleResult:
         started = time.monotonic()
         state = MainCycleState.STEP2
@@ -776,6 +819,7 @@ class MainCycleFlow(LifecycleTracked):
                 vision_height_mm,
                 cancel_event,
                 lambda message: report(f"第二步：{message}"),
+                speed=x_speed,
             )
 
             if self.arm_vision_service is not None:
@@ -819,6 +863,7 @@ class MainCycleFlow(LifecycleTracked):
                         self._vision_height_1,
                         cancel_event,
                         lambda message: report(f"第二步取料：{message}"),
+                        speed=x_speed,
                     )
                     self.middle_vacuum_service.set_mode(MiddleVacuumMode.VACUUM)
                     report(
@@ -837,6 +882,7 @@ class MainCycleFlow(LifecycleTracked):
                         cross_side_height_mm,
                         cancel_event,
                         lambda message: report(f"第二步換邊前：{message}"),
+                        speed=x_speed,
                     )
                     height = self._confirm_stopped_height(
                         cross_side_height_mm,
@@ -905,6 +951,7 @@ class MainCycleFlow(LifecycleTracked):
                     place_handoff=place_handoff,
                     movement_handoff=movement_handoff,
                     view=transfer_direction.camera_view,
+                    height_reference_depth_mm=height_reference_depth_mm,
                     progress_callback=lambda message: report(f"第二步手臂：{message}"),
                 )
                 self._vision_height_1 = safe_height(
@@ -935,7 +982,12 @@ class MainCycleFlow(LifecycleTracked):
             )
 
             step = "step2_m54_height"
-            height = self._move_height(self._vision_height_1, cancel_event, lambda message: report(f"第二步：{message}"))
+            height = self._move_height(
+                self._vision_height_1,
+                cancel_event,
+                lambda message: report(f"第二步：{message}"),
+                speed=x_speed,
+            )
             self.middle_vacuum_service.set_mode(MiddleVacuumMode.VACUUM)
             self.middle_vacuum_service.wait_transfer_ready(
                 vacuum_expected=True,
@@ -945,7 +997,12 @@ class MainCycleFlow(LifecycleTracked):
             self.vision_bridge_service.notify("m54_on_after_height", height_mm=self._vision_height_1)
 
             step = "step2_return_after_m54"
-            height = self._move_height(cross_side_height_mm, cancel_event, lambda message: report(f"第二步：{message}"))
+            height = self._move_height(
+                cross_side_height_mm,
+                cancel_event,
+                lambda message: report(f"第二步：{message}"),
+                speed=x_speed,
+            )
             self.vision_bridge_service.notify(
                 "returned_cross_side_height_after_m54",
                 cross_side_height_mm=cross_side_height_mm,
@@ -1074,8 +1131,10 @@ class MainCycleFlow(LifecycleTracked):
         target_height_mm: float,
         cancel_event: threading.Event,
         report: Callable[[str], None],
+        *,
+        speed: int | None = None,
     ) -> float:
-        self.lift_service.configure_position(target_height_mm)
+        self.lift_service.configure_position(target_height_mm, speed=speed)
         self.lift_service.start_vision_positioning()
         stable_reads = 0
         deadline = time.monotonic() + self.config.motion_timeout_seconds

@@ -191,10 +191,18 @@ class MainCycleStep1Body(BaseModel):
     action: str
     height_mm: float
     forward_mm: Optional[float] = None
+    x_speed: Optional[int] = Field(default=None, ge=1, le=32767)
+    y1_speed: Optional[int] = Field(default=None, ge=1, le=32767)
 
 
 class MainCycleSecondStepBody(BaseModel):
     transfer_direction: TransferDirection = TransferDirection.Y1_TO_Y2
+    x_speed: Optional[int] = Field(default=None, ge=1, le=32767)
+    height_reference_depth_mm: Optional[float] = Field(default=None, gt=0)
+
+
+class ArmPoseBody(BaseModel):
+    pose: str
 
 
 class PointOut(BaseModel):
@@ -250,81 +258,9 @@ VISION_HEIGHT_CANCEL_EVENT = threading.Event()
 MAIN_CYCLE_CANCEL_EVENT = threading.Event()
 SLOT_VACUUM_SERVICE.start_watchdog()
 
-# ============================================================
-# 程式啟動後，自動讓手臂與 Camera 移動到 STANDBY 待機姿態
-# ============================================================
-
-AUTO_MOVE_STANDBY_ON_START = True
-STARTUP_STANDBY_DELAY_SECONDS = 2.0
-_STARTUP_STANDBY_ONCE = threading.Event()
-
-
-def _move_arm_camera_to_standby_after_startup() -> None:
-    """程式啟動後，自動將 ID142～ID145 移動到 STANDBY。"""
-
-    if not AUTO_MOVE_STANDBY_ON_START:
-        logger.info("Startup STANDBY movement is disabled")
-        return
-
-    # 避免同一個 Python process 重複執行
-    if _STARTUP_STANDBY_ONCE.is_set():
-        logger.warning(
-            "Startup STANDBY movement already requested; skip duplicate"
-        )
-        return
-
-    _STARTUP_STANDBY_ONCE.set()
-
-    # 等 FastAPI、CAN 裝置與其他初始化稍微穩定
-    time.sleep(STARTUP_STANDBY_DELAY_SECONDS)
-
-    if not ARM_VISION_WORKFLOW_SERVICE.enabled:
-        logger.warning(
-            "Startup STANDBY skipped: ArmVisionWorkflowService is disabled"
-        )
-        return
-
-    if not FLOW_LOCK.acquire(blocking=False):
-        logger.warning(
-            "Startup STANDBY skipped: another PLC/arm flow is running"
-        )
-        return
-
-    try:
-        logger.warning(
-            "Startup STANDBY movement started; "
-            "moving ID142-ID145 to STANDBY"
-        )
-
-        result = ARM_VISION_WORKFLOW_SERVICE.move_standby_pose(
-            "STANDBY"
-        )
-
-        logger.info(
-            "Startup STANDBY movement completed angles=%s",
-            result.get("angles"),
-        )
-
-    except Exception as exc:  # noqa: BLE001
-        # 啟動待機姿態失敗時記錄錯誤，但不要讓整個 API 關閉
-        logger.exception(
-            "Startup STANDBY movement failed error=%s",
-            exc,
-        )
-
-    finally:
-        FLOW_LOCK.release()
-
-
-@app.on_event("startup")
-async def start_arm_camera_standby_movement() -> None:
-    """FastAPI 啟動完成後，在背景執行 STANDBY 移動。"""
-
-    threading.Thread(
-        target=_move_arm_camera_to_standby_after_startup,
-        daemon=True,
-        name="startup-standby-movement",
-    ).start()
+# FastAPI startup intentionally performs no CAN motion. HOME and STANDBY are
+# explicit operator/TXT/API actions so launching action_main.py cannot move the
+# arm or camera unexpectedly.
 
 # ===== Endpoint =====
 
@@ -1171,6 +1107,8 @@ def _main_cycle_command(body: MainCycleStep1Body) -> Step1Command:
         action=body.action,
         height_mm=body.height_mm,
         forward_mm=body.forward_mm,
+        x_speed=body.x_speed,
+        y1_speed=body.y1_speed,
     )
 
 
@@ -1401,6 +1339,10 @@ def run_main_cycle_second_step(
             MAIN_CYCLE_CANCEL_EVENT,
             _progress_logger("MainCycleFlow"),
             transfer_direction=direction,
+            x_speed=None if body is None else body.x_speed,
+            height_reference_depth_mm=(
+                None if body is None else body.height_reference_depth_mm
+            ),
         )
         return _main_cycle_response_after_home_postcheck(
             "第二步",
@@ -1453,9 +1395,7 @@ def run_independent_main_cycle_second_step(
     """獨立第二步：
 
     STANDBY
-    → 手臂回 HOME
-    → Camera 回 HOME
-    → 確認四軸 HOME
+    → 手臂與 Camera 四軸同步回 HOME 並確認
     → PLC 移到視覺高度
     → 執行視覺吸取／搬運
     → 成功後維持 HOME
@@ -1481,63 +1421,34 @@ def run_independent_main_cycle_second_step(
             direction.value,
         )
 
-        # 1. 手臂 ID142／ID143 回 HOME
-        logger.info("獨立第二步：手臂回 HOME")
+        # 1. ID142～ID145 同步回 HOME，並統一確認四軸讀值。
+        logger.info("獨立第二步：手臂與 Camera 四軸同步回 HOME")
 
-        arm_home_result = (
-            ARM_VISION_WORKFLOW_SERVICE.move_home_component("arm")
-        )
+        home_pose_result = ARM_VISION_WORKFLOW_SERVICE.move_named_pose("HOME")
 
         if MAIN_CYCLE_CANCEL_EVENT.is_set():
-            message = "獨立第二步已取消：手臂回 HOME 後停止"
+            message = "獨立第二步已取消：四軸同步回 HOME 後停止"
             return APIResponse(
                 ok=False,
                 data={
                     "status": "cancelled",
-                    "step": "move_arm_home",
+                    "step": "move_home_pose",
                     "message": message,
-                    "arm_home": arm_home_result,
+                    "home_pose": home_pose_result,
                 },
                 error=message,
             )
 
-        # 2. Camera ID144／ID145 回 HOME
-        logger.info("獨立第二步：Camera 回 HOME")
+        home_precheck = home_pose_result
 
-        camera_home_result = (
-            ARM_VISION_WORKFLOW_SERVICE.move_home_component("camera")
-        )
-
-        if MAIN_CYCLE_CANCEL_EVENT.is_set():
-            message = "獨立第二步已取消：Camera 回 HOME 後停止"
-            return APIResponse(
-                ok=False,
-                data={
-                    "status": "cancelled",
-                    "step": "move_camera_home",
-                    "message": message,
-                    "arm_home": arm_home_result,
-                    "camera_home": camera_home_result,
-                },
-                error=message,
-            )
-
-        # 3. 確認四顆馬達確實都在 HOME
-        logger.info("獨立第二步：確認四軸 HOME")
-
-        home_precheck = (
-            ARM_VISION_WORKFLOW_SERVICE.confirm_home(
-                MAIN_CYCLE_CANCEL_EVENT
-            )
-        )
-
-        # 4. HOME 確認完成後，PLC 才移動到視覺高度
+        # 2. HOME 確認完成後，PLC 才移動到視覺高度
         logger.info("獨立第二步：PLC 移到視覺高度")
 
         safe_height_mm = (
             MAIN_CYCLE_FLOW.prepare_independent_second_step_height(
                 MAIN_CYCLE_CANCEL_EVENT,
                 _progress_logger("MainCycleFlow"),
+                x_speed=None if body is None else body.x_speed,
             )
         )
 
@@ -1549,29 +1460,31 @@ def run_independent_main_cycle_second_step(
                     "status": "cancelled",
                     "step": "prepare_vision_height",
                     "message": message,
-                    "arm_home": arm_home_result,
-                    "camera_home": camera_home_result,
+                    "home_pose": home_pose_result,
                     "home_precheck": home_precheck,
                     "safe_height_mm": safe_height_mm,
                 },
                 error=message,
             )
 
-        # 5. 執行視覺辨識、吸取及搬運
+        # 3. 執行視覺辨識、吸取及搬運
         logger.info("獨立第二步：開始視覺吸取流程")
 
         result = MAIN_CYCLE_FLOW.run_independent_second_step(
             MAIN_CYCLE_CANCEL_EVENT,
             _progress_logger("MainCycleFlow"),
             transfer_direction=direction,
+            x_speed=None if body is None else body.x_speed,
+            height_reference_depth_mm=(
+                None if body is None else body.height_reference_depth_mm
+            ),
         )
 
         data = _main_cycle_result_data(result)
 
         data.update(
             {
-                "arm_home": arm_home_result,
-                "camera_home": camera_home_result,
+                "home_pose": home_pose_result,
                 "home_precheck": home_precheck,
                 "safe_height_mm": safe_height_mm,
             }
@@ -1592,7 +1505,7 @@ def run_independent_main_cycle_second_step(
                 error=result.message,
             )
 
-        # 6. 手臂流程的成功條件已包含四軸 HOME 角度回讀。
+        # 4. 手臂流程的成功條件已包含四軸 HOME 角度回讀。
         # 完成後保持 HOME，不再自動移動到 STANDBY。
         home_snapshot = ARM_CAMERA_HOME_INTERLOCK.snapshot
         if not home_snapshot.all_home_confirmed:
@@ -1646,25 +1559,30 @@ def run_independent_main_cycle_second_step(
     finally:
         FLOW_LOCK.release()
 
-@app.post("/arm-camera-standby/move", response_model=APIResponse)
-def move_arm_camera_standby() -> APIResponse:
-    """手動讓四顆 CAN 馬達移動到 STANDBY 待機姿態。"""
+def _move_arm_camera_pose(pose_name: str) -> APIResponse:
+    normalized_pose = str(pose_name).strip().upper()
+    if normalized_pose not in {"HOME", "STANDBY"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="pose 必須是 HOME 或 STANDBY",
+        )
 
     if not FLOW_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="已有 PLC／手臂流程執行中，無法移動到 STANDBY",
+            detail=f"已有 PLC／手臂流程執行中，無法移動到 {normalized_pose}",
         )
 
     try:
-        logger.info("Manual STANDBY movement started")
+        logger.info("Manual four-axis pose movement started pose=%s", normalized_pose)
 
-        result = ARM_VISION_WORKFLOW_SERVICE.move_standby_pose(
-            "STANDBY"
+        result = ARM_VISION_WORKFLOW_SERVICE.move_named_pose(
+            normalized_pose
         )
 
         logger.info(
-            "Manual STANDBY movement completed angles=%s",
+            "Manual four-axis pose movement completed pose=%s angles=%s",
+            normalized_pose,
             result.get("angles"),
         )
 
@@ -1675,7 +1593,8 @@ def move_arm_camera_standby() -> APIResponse:
 
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "Manual STANDBY movement failed error=%s",
+            "Manual four-axis pose movement failed pose=%s error=%s",
+            normalized_pose,
             exc,
         )
 
@@ -1686,6 +1605,20 @@ def move_arm_camera_standby() -> APIResponse:
 
     finally:
         FLOW_LOCK.release()
+
+
+@app.post("/arm-camera-pose/move", response_model=APIResponse)
+def move_arm_camera_pose(body: ArmPoseBody) -> APIResponse:
+    """Synchronously dispatch and confirm HOME or STANDBY for ID142-ID145."""
+
+    return _move_arm_camera_pose(body.pose)
+
+
+@app.post("/arm-camera-standby/move", response_model=APIResponse)
+def move_arm_camera_standby() -> APIResponse:
+    """Backward-compatible STANDBY endpoint."""
+
+    return _move_arm_camera_pose("STANDBY")
 
 
 @app.post("/flows/main-cycle/independent/third-step", response_model=APIResponse)

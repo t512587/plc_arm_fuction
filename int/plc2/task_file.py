@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 
-TASK_TYPES = {"pallet", "vision_transfer", "home", "wait", "confirm", "arm_pose"}
+TASK_TYPES = {
+    "control_settings",
+    "pallet",
+    "vision_transfer",
+    "home",
+    "wait",
+    "confirm",
+    "arm_pose",
+}
 SLOTS = {"Y1", "Y2", "NONE"}
 ACTIONS = {"suck", "push", "none"}
 DIRECTIONS = {"Y1_TO_Y2", "Y2_TO_Y1"}
-HOME_TARGETS = {"plc", "arm", "camera", "all"}
+HOME_TARGETS = {"plc", "arm", "camera"}
+ARM_POSES = {"HOME", "STANDBY"}
 MAX_VISION_TRANSFER_REPEAT = 100
 
 
@@ -67,6 +77,11 @@ def parse_task_text(text: str) -> list[TaskStep]:
     ]
     for step in steps:
         _validate_step(step)
+    settings_steps = [step for step in steps if step.type == "control_settings"]
+    if len(settings_steps) > 1:
+        raise TaskFileError("control_settings may appear only once")
+    if settings_steps and settings_steps[0].index != 1:
+        raise TaskFileError("control_settings must be the first step")
     return steps
 
 
@@ -85,7 +100,9 @@ def _require_type(raw: dict[str, str], index: int) -> str:
 
 
 def _validate_step(step: TaskStep) -> None:
-    if step.type == "pallet":
+    if step.type == "control_settings":
+        _validate_control_settings(step)
+    elif step.type == "pallet":
         _validate_pallet(step)
     elif step.type == "vision_transfer":
         direction = _required(step, "transfer_direction").upper()
@@ -105,7 +122,8 @@ def _validate_step(step: TaskStep) -> None:
         target = _required(step, "target").casefold()
         if target not in HOME_TARGETS:
             raise TaskFileError(
-                f"step {step.index}: home target must be plc, arm, camera, or all"
+                f"step {step.index}: home target must be plc, arm, or camera; "
+                "use type=arm_pose with pose=HOME for synchronized four-axis HOME"
             )
         step.values["target"] = target
     elif step.type == "wait":
@@ -116,9 +134,31 @@ def _validate_step(step: TaskStep) -> None:
         step.values.setdefault("message", f"Confirm step {step.index}")
     elif step.type == "arm_pose":
         pose = _required(step, "pose").upper()
-        if pose != "STANDBY":
-            raise TaskFileError(f"step {step.index}: arm_pose currently supports only STANDBY")
+        if pose not in ARM_POSES:
+            raise TaskFileError(
+                f"step {step.index}: arm_pose must be HOME or STANDBY"
+            )
         step.values["pose"] = pose
+
+
+def _validate_control_settings(step: TaskStep) -> None:
+    allowed = {"type", "x_speed", "y1_speed", "height_reference_depth_mm"}
+    unknown = sorted(set(step.values) - allowed)
+    if unknown:
+        raise TaskFileError(
+            f"step {step.index}: unsupported control setting(s): {', '.join(unknown)}"
+        )
+    for key in ("x_speed", "y1_speed"):
+        value = _whole_number(step, key)
+        if value < 1 or value > 32767:
+            raise TaskFileError(f"step {step.index}: {key} must be between 1 and 32767")
+        step.values[key] = str(value)
+    reference = _number(step, "height_reference_depth_mm")
+    if not math.isfinite(reference) or reference <= 0:
+        raise TaskFileError(
+            f"step {step.index}: height_reference_depth_mm must be greater than 0"
+        )
+    step.values["height_reference_depth_mm"] = f"{reference:g}"
 
 
 def _validate_pallet(step: TaskStep) -> None:
@@ -176,6 +216,14 @@ def _positive_integer(
             f"step {step.index}: {key} must be between 1 and {maximum}"
         )
     return value
+
+
+def _whole_number(step: TaskStep, key: str) -> int:
+    raw_value = _required(step, key)
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise TaskFileError(f"step {step.index}: {key} must be a whole number") from exc
 
 
 def _normalize_action(value: str) -> str:

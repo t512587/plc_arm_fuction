@@ -68,6 +68,7 @@ services:
       Y1:
         forward_target_point: Y1_FWD_POS
         forward_command_point: Y1_MOVE
+        speed_point: Y1_SPEED
         position_point: Y1_CUR_POS
         vacuum_point: Y1_VAC_ON
         break_vacuum_point: Y1_VAC_OFF

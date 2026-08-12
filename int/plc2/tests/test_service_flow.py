@@ -49,11 +49,13 @@ from service.middle_vacuum_service import (
 from lifecycle import LifecycleStatus
 from plc.client import PLCConnectionError
 from api.main import (
+    ArmPoseBody,
     FLOW_LOCK,
     PLC_MANAGER,
     _request_flow_cancellation,
     _run_independent_main_cycle_step,
     app,
+    move_arm_camera_pose,
     run_independent_main_cycle_second_step,
 )
 from service.plc_service import PLC_SERVICE
@@ -69,6 +71,7 @@ from d435_control import (
     confirm_home_pose,
     stop_all_motors_confirmed,
     wait_until_named_pose,
+    wait_until_target_angles,
 )
 
 class FakeClient:
@@ -259,6 +262,9 @@ class FakePalletTransferDomainService:
     def set_forward_position(self, slot: str, forward_mm: float) -> None:
         self.calls.append(f"{slot}:forward={forward_mm:g}")
 
+    def set_forward_speed(self, slot: str, speed: float) -> None:
+        self.calls.append(f"{slot}:speed={speed:g}")
+
     def start_forward(self, slot: str) -> None:
         self.calls.append(f"{slot}:start_forward")
         self.forward_commands[slot] = True
@@ -357,6 +363,7 @@ class FakeArmVisionWorkflowDomainService:
         self.height_mm = height_mm
         self.calls: list[str] = []
         self.views: list[str | None] = []
+        self.height_references: list[float | None] = []
 
     def run_pick_and_place(
         self,
@@ -366,11 +373,13 @@ class FakeArmVisionWorkflowDomainService:
         place_handoff,
         movement_handoff=None,
         view=None,
+        height_reference_depth_mm=None,
         progress_callback=None,
     ) -> dict:
         if movement_handoff is not None:
             movement_handoff("fake arm start")
         self.views.append(view)
+        self.height_references.append(height_reference_depth_mm)
         self.calls.append("run_pick_and_place")
         if progress_callback is not None:
             progress_callback("fake arm started")
@@ -382,6 +391,9 @@ class FakeArmVisionWorkflowDomainService:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_api_startup_has_no_automatic_can_pose_movement(self) -> None:
+        self.assertEqual([], app.router.on_startup)
+
     def test_latest_rview_calibration_and_reverse_route_are_enabled(self) -> None:
         self.assertEqual(
             (
@@ -575,6 +587,73 @@ class ConfigTests(unittest.TestCase):
             )
         )
         self.assertIn("repeat=3", MainWindow._task_step_summary(step))
+
+    def test_txt_control_settings_are_attached_to_motion_requests(self) -> None:
+        window = SimpleNamespace(
+            _task_file_control_settings={
+                "x_speed": "250",
+                "y1_speed": "180",
+                "height_reference_depth_mm": "615.5",
+            }
+        )
+        pallet = SimpleNamespace(
+            index=2,
+            type="pallet",
+            values={
+                "slot": "Y1",
+                "action": "suck",
+                "height_mm": "560",
+                "forward_mm": "120",
+            },
+        )
+        vision = SimpleNamespace(
+            index=3,
+            type="vision_transfer",
+            values={"transfer_direction": "Y1_TO_Y2", "repeat": "1"},
+        )
+
+        pallet_payload = MainWindow._task_step_requests(window, pallet)[0][2]
+        vision_payload = MainWindow._task_step_requests(window, vision)[0][2]
+
+        self.assertEqual(250, pallet_payload["x_speed"])
+        self.assertEqual(180, pallet_payload["y1_speed"])
+        self.assertEqual(250, vision_payload["x_speed"])
+        self.assertEqual(615.5, vision_payload["height_reference_depth_mm"])
+
+    def test_txt_arm_pose_home_and_standby_use_one_generic_request(self) -> None:
+        for pose in ("HOME", "STANDBY"):
+            with self.subTest(pose=pose):
+                step = SimpleNamespace(
+                    index=3,
+                    type="arm_pose",
+                    values={"pose": pose},
+                )
+
+                requests_to_run = MainWindow._task_step_requests(None, step)
+
+                self.assertEqual(
+                    [
+                        (
+                            f"TXT step 3 arm pose {pose}",
+                            "/arm-camera-pose/move",
+                            {"pose": pose},
+                            60,
+                        )
+                    ],
+                    requests_to_run,
+                )
+
+    def test_generic_arm_pose_api_normalizes_and_dispatches_one_pose(self) -> None:
+        with patch(
+            "api.main.ARM_VISION_WORKFLOW_SERVICE.move_named_pose",
+            return_value={"pose": "HOME", "confirmed": True, "angles": {}},
+        ) as move_pose:
+            response = move_arm_camera_pose(ArmPoseBody(pose="home"))
+
+        self.assertTrue(response.ok)
+        self.assertEqual("HOME", response.data["pose"])
+        move_pose.assert_called_once_with("HOME")
+        self.assertFalse(FLOW_LOCK.locked())
 
     def test_main_cycle_waiting_phase_only_opens_confirmation_gate(self) -> None:
         calls: list[tuple[str, str | None]] = []
@@ -786,17 +865,13 @@ class ConfigTests(unittest.TestCase):
 
         with (
             patch(
-                "api.main.ARM_VISION_WORKFLOW_SERVICE.move_home_component",
-                side_effect=[{"component": "arm"}, {"component": "camera"}],
-            ),
-            patch(
-                "api.main.ARM_VISION_WORKFLOW_SERVICE.confirm_home",
-                return_value={"confirmed": True},
-            ),
-            patch(
-                "api.main.ARM_VISION_WORKFLOW_SERVICE.move_standby_pose",
-                return_value={"pose": "STANDBY", "angles": {"ID142": 1.0}},
-            ) as move_standby,
+                "api.main.ARM_VISION_WORKFLOW_SERVICE.move_named_pose",
+                return_value={
+                    "pose": "HOME",
+                    "confirmed": True,
+                    "all_home_confirmed": True,
+                },
+            ) as move_home,
             patch(
                 "api.main.MAIN_CYCLE_FLOW.prepare_independent_second_step_height",
                 return_value=560.0,
@@ -810,7 +885,8 @@ class ConfigTests(unittest.TestCase):
             response = run_independent_main_cycle_second_step(None)
 
         self.assertTrue(response.ok)
-        move_standby.assert_not_called()
+        move_home.assert_called_once_with("HOME")
+        self.assertEqual("HOME", response.data["home_pose"]["pose"])
         self.assertFalse(response.data["standby_pose_attempted"])
         self.assertEqual("HOME", response.data["final_pose"])
         self.assertEqual(
@@ -1619,11 +1695,13 @@ class DomainServiceTests(unittest.TestCase):
 
         service.precheck()
         service.set_forward_position("Y1", 123)
+        service.set_forward_speed("Y1", 180)
         service.start_forward("Y1")
         service.set_action_output("Y1", PalletAction.SUCK)
         service.stop_forward("Y1")
 
         self.assertIn(("Y1_FWD_POS", 123), plc.writes)
+        self.assertIn(("Y1_SPEED", 180), plc.writes)
         self.assertIn(("Y1_MOVE", True), plc.writes)
         self.assertIn(("Y1_VAC_ON", True), plc.writes)
         self.assertIn(("Y1_MOVE", False), plc.writes)
@@ -1679,6 +1757,19 @@ class DomainServiceTests(unittest.TestCase):
 
         self.assertIn(("X_FWD_POS", 560.0), plc.writes)
         self.assertIn(("X_SPEED", 200.0), plc.writes)
+
+    def test_lift_and_y1_speed_require_matching_plc_readback(self) -> None:
+        class WrongReadbackPointService(FakePointService):
+            def read_point(self, point_id: str) -> float | bool:
+                if point_id in {"X_SPEED", "Y1_SPEED"}:
+                    return 1
+                return super().read_point(point_id)
+
+        plc = WrongReadbackPointService()
+        with self.assertRaisesRegex(LiftServiceError, "讀回不一致"):
+            LiftService(plc).configure_position(560.0, speed=250)
+        with self.assertRaisesRegex(RuntimeError, "讀回不一致"):
+            PalletTransferService(plc).set_forward_speed("Y1", 180)
 
     def test_lift_blocks_above_695_until_arm_and_camera_home_is_confirmed(self) -> None:
         plc = FakePointService()
@@ -1910,6 +2001,39 @@ class ArmVisionWorkflowServiceTests(unittest.TestCase):
                 self.assertIn(component, command)
                 self.assertNotIn("--confirm-home-only", command)
                 self.assertEqual(LifecycleStatus.SUCCESS, service.status)
+
+    def test_named_home_and_standby_update_four_axis_interlock(self) -> None:
+        angles = {
+            "ID 142": 6.0,
+            "ID 143": -22.93,
+            "ID 144": 6.7,
+            "ID 145": 36.49,
+        }
+        source = (
+            "import json\n"
+            "print('[POSE_STATE] NAMED_POSE_CONFIRMED', flush=True)\n"
+            f"angles = {angles!r}\n"
+            "print('[POSE_RESULT] ' + json.dumps({'angles': angles}), flush=True)\n"
+        )
+        for pose, expected_home in (("HOME", True), ("STANDBY", False)):
+            with self.subTest(pose=pose), tempfile.TemporaryDirectory() as temp_dir:
+                interlock = ArmCameraHomeInterlock()
+                service = self.service_for_script(
+                    Path(temp_dir),
+                    source,
+                    home_interlock=interlock,
+                    home_timeout_seconds=0.1,
+                    settle_seconds=0.0,
+                )
+
+                result = service.move_named_pose(pose)
+                command = service._named_pose_command(pose)
+
+                self.assertEqual(pose, result["pose"])
+                self.assertEqual(expected_home, result["all_home_confirmed"])
+                self.assertEqual(expected_home, interlock.all_home_confirmed)
+                self.assertIn("--move-pose-only", command)
+                self.assertIn(pose, command)
 
     def test_standalone_home_confirmation_keeps_interlock_locked_without_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2572,7 +2696,14 @@ class FlowTests(unittest.TestCase):
             FakeVisionBridgeDomainService(560.0),
             self.main_cycle_config(),
         )
-        command = Step1Command("Y1", "suck", 560.0, 111.0)
+        command = Step1Command(
+            "Y1",
+            "suck",
+            560.0,
+            111.0,
+            x_speed=275,
+            y1_speed=180,
+        )
 
         first = flow.run_independent_first_step(command, threading.Event())
         repeated = flow.run_independent_first_step(command, threading.Event())
@@ -2581,6 +2712,8 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(repeated.succeeded)
         self.assertEqual(MainCyclePhase.READY_FIRST_STEP, flow.phase)
         self.assertEqual(2, pallet.calls.count("Y1:forward=111"))
+        self.assertTrue(all(speed == 275 for _height, speed in lift.position_config))
+        self.assertEqual(4, pallet.calls.count("Y1:speed=180"))
 
     def test_independent_second_step_ignores_guided_phase(self) -> None:
         lift = FakeLiftDomainService(
@@ -2800,11 +2933,13 @@ class FlowTests(unittest.TestCase):
                 place_handoff,
                 movement_handoff=None,
                 view=None,
+                height_reference_depth_mm=None,
                 progress_callback=None,
             ) -> dict:
                 if movement_handoff is not None:
                     movement_handoff("fake arm start")
                 self.views.append(view)
+                self.height_references.append(height_reference_depth_mm)
                 self.calls.append("run_pick_and_place")
                 pick_handoff(self.height_mm, {"depth_m": 0.78})
                 self.safe_height_after_handoff.append(
@@ -2836,7 +2971,11 @@ class FlowTests(unittest.TestCase):
         cancel_event = threading.Event()
 
         flow.run_first_step(Step1Command("none", "none", 560.0), cancel_event)
-        second = flow.run_second_step(cancel_event)
+        second = flow.run_second_step(
+            cancel_event,
+            x_speed=250,
+            height_reference_depth_mm=615.5,
+        )
 
         self.assertEqual(MainCycleState.SUCCESS, second.state)
         self.assertEqual(MainCyclePhase.WAITING_FINAL_STEP1, flow.phase)
@@ -2850,6 +2989,8 @@ class FlowTests(unittest.TestCase):
             [target for target, _speed in lift.position_config],
         )
         self.assertEqual(["RView"], arm.views)
+        self.assertEqual([615.5], arm.height_references)
+        self.assertTrue(all(speed == 250 for _target, speed in lift.position_config))
         self.assertEqual([], vision.events)
 
     def test_main_cycle_y2_to_y1_selects_lview(self) -> None:
@@ -3042,6 +3183,13 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(680.0, service.depth_m_to_plc_height_mm(0.74))
         self.assertEqual(685.0, service.depth_m_to_plc_height_mm(0.745))
         self.assertEqual(695.0, service.depth_m_to_plc_height_mm(0.9))
+        self.assertEqual(
+            625.0,
+            service.depth_m_to_plc_height_mm(
+                0.7,
+                height_reference_depth_mm=635.0,
+            ),
+        )
 
     def test_home_pose_requires_consecutive_stable_four_motor_readbacks(self) -> None:
         home = {
@@ -3087,6 +3235,47 @@ class FlowTests(unittest.TestCase):
             )
 
         self.assertEqual({"ID 144": 6.7, "ID 145": 36.49}, result)
+
+    def test_dynamic_suction_target_requires_stable_readback_from_both_arm_axes(self) -> None:
+        target = {"ID 142": 42.0, "ID 143": -61.0}
+        outside = {"ID 142": 42.0, "ID 143": -55.0, "ID 144": 6.7, "ID 145": 36.49}
+        inside = {"ID 142": 42.2, "ID 143": -60.8, "ID 144": 6.7, "ID 145": 36.49}
+        controller = FakeArmPoseController([outside, inside, inside, inside])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = wait_until_target_angles(
+                controller,
+                "RIGHT_SUCTION_TARGET",
+                target,
+                tolerance_degrees=1.0,
+                stable_reads=3,
+                timeout_seconds=0.1,
+                poll_interval_seconds=0.001,
+            )
+
+        self.assertEqual({"ID 142": 42.2, "ID 143": -60.8}, result)
+
+    def test_dynamic_target_timeout_reports_each_motor_target_actual_and_error(self) -> None:
+        reading = {"ID 142": 40.0, "ID 143": -50.0, "ID 144": 6.7, "ID 145": 36.49}
+        controller = FakeArmPoseController([reading])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(TimeoutError) as raised:
+                wait_until_target_angles(
+                    controller,
+                    "LEFT_PLACE_TARGET",
+                    {"ID 142": 50.0, "ID 143": -60.0},
+                    tolerance_degrees=1.0,
+                    stable_reads=2,
+                    timeout_seconds=0.003,
+                    poll_interval_seconds=0.001,
+                )
+
+        message = str(raised.exception)
+        self.assertIn("LEFT_PLACE_TARGET", message)
+        self.assertIn("'target': 50.0", message)
+        self.assertIn("'actual': 40.0", message)
+        self.assertIn("'error': 10.0", message)
 
     def test_final_home_marker_is_emitted_only_after_readback_confirmation(self) -> None:
         home = {

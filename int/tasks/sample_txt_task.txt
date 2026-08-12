@@ -2,8 +2,17 @@
 # Load this file from the UI: TXT task file -> Load TXT -> Run TXT.
 
 step
-type=home
-target=all
+type=control_settings
+x_speed=300
+y1_speed=400
+height_reference_depth_mm=630.0
+
+step
+type=pallet
+slot=Y1
+action=push
+height_mm=0
+forward_mm=0
 
 step
 type=arm_pose

@@ -181,6 +181,16 @@ class LiftService(LifecycleTracked):
             self.plc_service.write_point(self.config.target_point, target_height_mm)
             if selected_speed is not None:
                 self.plc_service.write_point(self.config.speed_point, selected_speed)
+                speed_readback = float(
+                    self.plc_service.read_point(self.config.speed_point)
+                )
+                if speed_readback != float(selected_speed):
+                    raise LiftServiceError(
+                        "configure_position",
+                        "速度寫入後讀回不一致："
+                        f"要求 {selected_speed:g}，讀回 {speed_readback:g}",
+                        point_id=self.config.speed_point,
+                    )
         except Exception as exc:
             raise LiftServiceError("configure_position", str(exc), point_id=self.config.target_point) from exc
 

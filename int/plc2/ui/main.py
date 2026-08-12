@@ -144,6 +144,7 @@ class MainWindow(tk.Tk):
         self.main_cycle_final_forward_var = tk.StringVar(value="")
         self.task_file_path_var = tk.StringVar(value="No TXT task loaded")
         self._task_file_steps: list[TaskStep] = []
+        self._task_file_control_settings: dict[str, str] = {}
         self._task_file_running = False
         self._task_file_index = 0
         self.main_cycle_phase = "ready_first_step"
@@ -1537,6 +1538,11 @@ class MainWindow(tk.Tk):
             return
 
         self._task_file_steps = steps
+        self._task_file_control_settings = (
+            dict(steps[0].values)
+            if steps and steps[0].type == "control_settings"
+            else {}
+        )
         self.task_file_path_var.set(path)
         self.task_file_list.delete(0, tk.END)
         for step in steps:
@@ -1628,6 +1634,9 @@ class MainWindow(tk.Tk):
         if step.type == "wait":
             milliseconds = int(float(step.values["seconds"]) * 1000)
             self.after(milliseconds, self._complete_current_task_file_step)
+            return
+        if step.type == "control_settings":
+            self._complete_current_task_file_step()
             return
         if step.type == "confirm":
             if messagebox.askyesno(
@@ -1762,6 +1771,7 @@ class MainWindow(tk.Tk):
         step: TaskStep,
     ) -> list[tuple[str, str, dict[str, Any] | None, float]]:
         if step.type == "pallet":
+            settings = getattr(self, "_task_file_control_settings", {})
             payload: dict[str, Any] = {
                 "slot": step.values["slot"],
                 "action": step.values["action"],
@@ -1772,6 +1782,9 @@ class MainWindow(tk.Tk):
                     else float(step.values["forward_mm"])
                 ),
             }
+            if settings:
+                payload["x_speed"] = int(settings["x_speed"])
+                payload["y1_speed"] = int(settings["y1_speed"])
             return [
                 (
                     f"TXT step {step.index} pallet",
@@ -1782,12 +1795,21 @@ class MainWindow(tk.Tk):
             ]
         if step.type == "vision_transfer":
             repeat = int(step.values.get("repeat", "1"))
+            settings = getattr(self, "_task_file_control_settings", {})
+            payload = {
+                "transfer_direction": step.values["transfer_direction"],
+            }
+            if settings:
+                payload["x_speed"] = int(settings["x_speed"])
+                payload["height_reference_depth_mm"] = float(
+                    settings["height_reference_depth_mm"]
+                )
             return [
                 (
                     f"TXT step {step.index} vision_transfer repeat "
                     f"{iteration}/{repeat}",
                     "/flows/main-cycle/independent/second-step",
-                    {"transfer_direction": step.values["transfer_direction"]},
+                    payload,
                     MAIN_CYCLE_SECOND_STEP_REQUEST_TIMEOUT_SECONDS,
                 )
                 for iteration in range(1, repeat + 1)
@@ -1795,7 +1817,7 @@ class MainWindow(tk.Tk):
         if step.type == "home":
             target = step.values["target"]
             requests_to_run: list[tuple[str, str, dict[str, Any] | None, float]] = []
-            if target in {"plc", "all"}:
+            if target == "plc":
                 requests_to_run.append(
                     (
                         f"TXT step {step.index} PLC home",
@@ -1804,7 +1826,7 @@ class MainWindow(tk.Tk):
                         HOME_FLOW_REQUEST_TIMEOUT_SECONDS,
                     )
                 )
-            if target in {"arm", "all"}:
+            if target == "arm":
                 requests_to_run.append(
                     (
                         f"TXT step {step.index} arm home",
@@ -1813,7 +1835,7 @@ class MainWindow(tk.Tk):
                         60,
                     )
                 )
-            if target in {"camera", "all"}:
+            if target == "camera":
                 requests_to_run.append(
                     (
                         f"TXT step {step.index} camera home",
@@ -1825,12 +1847,12 @@ class MainWindow(tk.Tk):
             return requests_to_run
         if step.type == "arm_pose":
             pose = step.values["pose"]
-            if pose == "STANDBY":
+            if pose in {"HOME", "STANDBY"}:
                 return [
                     (
-                        f"TXT step {step.index} arm pose STANDBY",
-                        "/arm-camera-standby/move",
-                        None,
+                        f"TXT step {step.index} arm pose {pose}",
+                        "/arm-camera-pose/move",
+                        {"pose": pose},
                         60,
                     )
                 ]
@@ -1839,6 +1861,13 @@ class MainWindow(tk.Tk):
 
     @staticmethod
     def _task_step_summary(step: TaskStep) -> str:
+        if step.type == "control_settings":
+            return (
+                f"{step.index}. control_settings "
+                f"X速度={step.values.get('x_speed')} "
+                f"Y1速度={step.values.get('y1_speed')} "
+                f"深度基準={step.values.get('height_reference_depth_mm')}mm"
+            )
         if step.type == "pallet":
             forward = step.values.get("forward_mm", "")
             return (
