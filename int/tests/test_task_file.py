@@ -6,6 +6,66 @@ from plc2.task_file import TaskFileError, parse_task_text
 
 
 class TaskFileParserTests(unittest.TestCase):
+    def test_parses_amr_only_task(self) -> None:
+        steps = parse_task_text(
+            """
+            step
+            type=amr_connect
+
+            step
+            type=amr_setobs
+            precision_xy=0.03
+            precision_yaw=0.087
+
+            step
+            type=amr_read_map
+            map_name=170-0810
+
+            step
+            type=amr_goto
+            position_id=Point-d6uj6p
+            response_timeout_seconds=180
+            arrival_xy=0.10
+            hold_seconds=0.8
+            poll_interval=0.35
+
+            step
+            type=amr_disconnect
+            """
+        )
+
+        self.assertEqual(
+            ["amr_connect", "amr_setobs", "amr_read_map", "amr_goto", "amr_disconnect"],
+            [step.type for step in steps],
+        )
+        self.assertEqual("0.03", steps[1].values["precision_xy"])
+        self.assertEqual("0.087", steps[1].values["precision_yaw"])
+        self.assertEqual("170-0810", steps[2].values["map_name"])
+        self.assertEqual("Point-d6uj6p", steps[3].values["position_id"])
+        self.assertEqual("180", steps[3].values["response_timeout_seconds"])
+        self.assertEqual("0.1", steps[3].values["arrival_xy"])
+        self.assertEqual("0.8", steps[3].values["hold_seconds"])
+        self.assertEqual("0.35", steps[3].values["poll_interval"])
+
+    def test_rejects_invalid_amr_steps(self) -> None:
+        cases = (
+            ("type=amr_connect\nextra=1", "unsupported field"),
+            ("type=amr_setobs\nprecision_xy=0\nprecision_yaw=0.087", "precision_xy"),
+            ("type=amr_setobs\nprecision_xy=0.03", "precision_yaw"),
+            ("type=amr_read_map", "missing map_name"),
+            (
+                "type=amr_goto\nposition_id=Point-1\nresponse_timeout_seconds=0\narrival_xy=0.1\nhold_seconds=0.8\npoll_interval=0.35",
+                "response_timeout_seconds",
+            ),
+            (
+                "type=amr_goto\nposition_id=Point-1\nresponse_timeout_seconds=3601\narrival_xy=0.1\nhold_seconds=0.8\npoll_interval=0.35",
+                "response_timeout_seconds",
+            ),
+        )
+        for body, message in cases:
+            with self.subTest(body=body), self.assertRaisesRegex(TaskFileError, message):
+                parse_task_text(f"step\n{body}\n")
+
     def test_parses_supported_step_types_in_order(self) -> None:
         steps = parse_task_text(
             """

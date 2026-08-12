@@ -34,6 +34,7 @@ from service.pallet_transfer_service import PalletTransferService
 from service.vision_bridge_service import VisionBridgeService
 from service.arm_vision_workflow_service import ArmVisionWorkflowService
 from service.arm_camera_home_interlock import ARM_CAMERA_HOME_INTERLOCK
+from service.amr_navigation_service import AmrNavigationService
 from service.slot_vacuum_service import (
     CargoPurpose,
     SlotOccupancy,
@@ -205,6 +206,23 @@ class ArmPoseBody(BaseModel):
     pose: str
 
 
+class AmrReadMapBody(BaseModel):
+    map_name: str = Field(..., min_length=1)
+
+
+class AmrSetObsBody(BaseModel):
+    precision_xy: float = Field(..., gt=0)
+    precision_yaw: float = Field(..., gt=0)
+
+
+class AmrGotoBody(BaseModel):
+    position_id: str = Field(..., min_length=1)
+    response_timeout_seconds: float = Field(default=180.0, gt=0, le=3600)
+    arrival_xy: float = Field(default=0.10, gt=0)
+    hold_seconds: float = Field(default=0.8, ge=0)
+    poll_interval: float = Field(default=0.35, gt=0)
+
+
 class PointOut(BaseModel):
     id: str
     name: str
@@ -256,6 +274,8 @@ FLOW_LOCK = threading.Lock()
 HOME_CANCEL_EVENT = threading.Event()
 VISION_HEIGHT_CANCEL_EVENT = threading.Event()
 MAIN_CYCLE_CANCEL_EVENT = threading.Event()
+AMR_NAVIGATION_SERVICE = AmrNavigationService()
+AMR_LOCK = threading.Lock()
 SLOT_VACUUM_SERVICE.start_watchdog()
 
 # FastAPI startup intentionally performs no CAN motion. HOME and STANDBY are
@@ -271,6 +291,120 @@ async def health_check() -> APIResponse:
 
     logger.info("Health check called")
     return APIResponse(ok=True, data={"status": "ok"})
+
+
+def _amr_failure(operation: str, exc: Exception) -> APIResponse:
+    logger.error("AMR %s failed: %s", operation, exc)
+    cleanup = AMR_NAVIGATION_SERVICE.cancel_and_disconnect()
+    message = f"AMR {operation} failed: {exc}"
+    return APIResponse(
+        ok=False,
+        data={
+            "status": "error",
+            "state": "error",
+            "step": f"amr_{operation}",
+            "message": message,
+            "cleanup": cleanup,
+        },
+        error=message,
+    )
+
+
+@app.post("/amr/connect", response_model=APIResponse)
+def connect_amr() -> APIResponse:
+    try:
+        return APIResponse(ok=True, data=AMR_NAVIGATION_SERVICE.connect())
+    except Exception as exc:  # noqa: BLE001
+        return _amr_failure("connect", exc)
+
+
+@app.post("/amr/read-map", response_model=APIResponse)
+def read_amr_map(body: AmrReadMapBody) -> APIResponse:
+    try:
+        return APIResponse(
+            ok=True,
+            data=AMR_NAVIGATION_SERVICE.read_map(body.map_name),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _amr_failure("read_map", exc)
+
+
+@app.post("/amr/set-obs", response_model=APIResponse)
+def set_amr_navigation_precision(body: AmrSetObsBody) -> APIResponse:
+    try:
+        return APIResponse(
+            ok=True,
+            data=AMR_NAVIGATION_SERVICE.set_navigation_precision(
+                body.precision_xy,
+                body.precision_yaw,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _amr_failure("set_obs", exc)
+
+
+@app.post("/amr/goto", response_model=APIResponse)
+def goto_amr_position(body: AmrGotoBody) -> APIResponse:
+    if not AMR_LOCK.acquire(blocking=False):
+        return APIResponse(
+            ok=False,
+            data={
+                "status": "error",
+                "state": "error",
+                "step": "amr_goto",
+                "message": "Another AMR navigation request is running",
+            },
+            error="Another AMR navigation request is running",
+        )
+    try:
+        result = AMR_NAVIGATION_SERVICE.goto(
+            body.position_id,
+            body.response_timeout_seconds,
+            arrival_xy=body.arrival_xy,
+            hold_seconds=body.hold_seconds,
+            poll_interval=body.poll_interval,
+        )
+        response = result.get("response", {})
+        logger.info(
+            "AMR arrival confirmed position_id=%s code=%r msg=%r; "
+            "continuing to next TXT step",
+            body.position_id,
+            response.get("code"),
+            response.get("msg"),
+        )
+        return APIResponse(ok=True, data=result)
+    except Exception as exc:  # noqa: BLE001
+        return _amr_failure("goto", exc)
+    finally:
+        AMR_LOCK.release()
+
+
+@app.post("/amr/disconnect", response_model=APIResponse)
+def disconnect_amr() -> APIResponse:
+    try:
+        return APIResponse(
+            ok=True,
+            data=AMR_NAVIGATION_SERVICE.disconnect(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _amr_failure("disconnect", exc)
+
+
+@app.post("/flows/amr/cancel", response_model=APIResponse)
+def cancel_amr_task() -> APIResponse:
+    result = AMR_NAVIGATION_SERVICE.cancel_and_disconnect()
+    message = "AMR navigation cancelled and disconnected"
+    return APIResponse(
+        ok=bool(result.get("success")),
+        data={
+            "status": "cancelled",
+            "state": "cancelled",
+            "step": "amr_cancel",
+            "message": message,
+            **result,
+        },
+        error=None if result.get("success") else "; ".join(result.get("errors", [])),
+    )
 
 
 @app.get("/lifecycle/status", response_model=APIResponse)

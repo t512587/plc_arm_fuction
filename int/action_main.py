@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the integrated PLC + D435 action UI from the int-amr root."""
+"""Start the integrated PLC, arm, vision, and AMR task UI."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ PLC2_MAIN = PLC2_DIR / "main.py"
 
 
 def prepare_import_path() -> None:
-    """Make plc2's local packages win over root-level legacy modules."""
+    """Prefer plc2 modules while keeping root packages such as amr_cmd visible."""
 
     root = str(ROOT_DIR)
     plc2 = str(PLC2_DIR)
     sys.path[:] = [path for path in sys.path if path not in {root, plc2}]
+    sys.path.insert(0, root)
     sys.path.insert(0, plc2)
     sys.modules.pop("ui", None)
     sys.modules.pop("ui.main", None)

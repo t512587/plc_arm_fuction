@@ -40,6 +40,9 @@ FLOW_COMPONENT_NAMES = {
     "vision-height": "VisionHeightFlow",
     "main-cycle": "MainCycleFlow",
 }
+AMR_TASK_TYPES = {
+    "amr_connect", "amr_setobs", "amr_read_map", "amr_goto", "amr_disconnect"
+}
 FLOW_TERMINAL_STATUSES = {"success", "cancelled", "timeout", "error"}
 HOME_FLOW_REQUEST_TIMEOUT_SECONDS = 210
 MAIN_CYCLE_STEP_REQUEST_TIMEOUT_SECONDS = 360
@@ -731,7 +734,7 @@ class MainWindow(tk.Tk):
             task_file_frame,
             text="Load TXT",
             command=self.on_load_task_file_clicked,
-            state=tk.DISABLED,
+            state=tk.NORMAL,
         )
         self.btn_task_file_run = ttk.Button(
             task_file_frame,
@@ -1547,12 +1550,16 @@ class MainWindow(tk.Tk):
         self.task_file_list.delete(0, tk.END)
         for step in steps:
             self.task_file_list.insert(tk.END, self._task_step_summary(step))
-        if self._connected and not self._active_flow and not self._stop_unconfirmed:
+        if (
+            self._active_flow is None
+            and not self._stop_unconfirmed
+            and (self._connected or not self._task_file_requires_plc())
+        ):
             self.btn_task_file_run.configure(state=tk.NORMAL)
         self.status_var.set(f"Loaded TXT task: {len(steps)} steps")
 
     def on_run_task_file_clicked(self) -> None:
-        if not self._connected:
+        if not self._connected and self._task_file_requires_plc():
             messagebox.showwarning("TXT task", "Please connect PLC first.", parent=self)
             return
         if self._active_flow is not None:
@@ -1578,7 +1585,9 @@ class MainWindow(tk.Tk):
 
         self._task_file_running = True
         self._task_file_index = 0
-        self._active_flow = "main-cycle"
+        self._active_flow = (
+            "amr" if self._task_file_is_amr_only() else "main-cycle"
+        )
         self._active_flow_label = "TXT task"
         self._flow_started_at = time.monotonic()
         self._flow_cancelling = False
@@ -1616,7 +1625,7 @@ class MainWindow(tk.Tk):
                     },
                 },
                 None,
-                expected_flow="main-cycle",
+                expected_flow=("amr" if self._task_file_is_amr_only() else "main-cycle"),
             )
             self.main_cycle_phase = "ready_first_step"
             self._refresh_main_cycle_phase_ui()
@@ -1739,8 +1748,41 @@ class MainWindow(tk.Tk):
         self,
         message: str,
         payload: dict[str, Any] | None = None,
+        *,
+        cleanup_attempted: bool = False,
     ) -> None:
         self._task_file_running = False
+        if self._task_file_is_amr_only() and not cleanup_attempted:
+            def worker() -> None:
+                cleanup_error: str | None = None
+                try:
+                    response = requests.post(
+                        API_BASE_URL + "/flows/amr/cancel",
+                        timeout=5,
+                    )
+                    response.raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_error = str(exc)
+                final_message = message
+                if cleanup_error is not None:
+                    final_message = (
+                        f"{message}; AMR cancel/disconnect cleanup failed: "
+                        f"{cleanup_error}"
+                    )
+                self._post_ui(
+                    lambda: self._finish_task_file_error(
+                        final_message,
+                        payload,
+                        cleanup_attempted=True,
+                    )
+                )
+
+            threading.Thread(
+                target=worker,
+                daemon=True,
+                name="txt-task-amr-error-cleanup",
+            ).start()
+            return
         if payload is None or not isinstance(payload.get("data"), dict):
             payload = {
                 "ok": False,
@@ -1761,7 +1803,7 @@ class MainWindow(tk.Tk):
             "TXT task",
             payload,
             None,
-            expected_flow="main-cycle",
+            expected_flow=("amr" if self._task_file_is_amr_only() else "main-cycle"),
         )
         self.main_cycle_phase = "ready_first_step"
         self._refresh_main_cycle_phase_ui()
@@ -1857,6 +1899,46 @@ class MainWindow(tk.Tk):
                     )
                 ]
             raise ValueError(f"Unsupported arm pose: {pose}")
+        if step.type == "amr_connect":
+            return [(f"TXT step {step.index} AMR connect", "/amr/connect", None, 10)]
+        if step.type == "amr_setobs":
+            return [(
+                f"TXT step {step.index} AMR set navigation precision",
+                "/amr/set-obs",
+                {
+                    "precision_xy": float(step.values["precision_xy"]),
+                    "precision_yaw": float(step.values["precision_yaw"]),
+                },
+                10,
+            )]
+        if step.type == "amr_read_map":
+            return [(
+                f"TXT step {step.index} AMR read map",
+                "/amr/read-map",
+                {"map_name": step.values["map_name"]},
+                30,
+            )]
+        if step.type == "amr_goto":
+            response_timeout = float(step.values["response_timeout_seconds"])
+            return [(
+                f"TXT step {step.index} AMR goto {step.values['position_id']}",
+                "/amr/goto",
+                {
+                    "position_id": step.values["position_id"],
+                    "response_timeout_seconds": response_timeout,
+                    "arrival_xy": float(step.values["arrival_xy"]),
+                    "hold_seconds": float(step.values["hold_seconds"]),
+                    "poll_interval": float(step.values["poll_interval"]),
+                },
+                response_timeout + 10,
+            )]
+        if step.type == "amr_disconnect":
+            return [(
+                f"TXT step {step.index} AMR disconnect",
+                "/amr/disconnect",
+                None,
+                10,
+            )]
         raise ValueError(f"Unsupported executable task type: {step.type}")
 
     @staticmethod
@@ -1889,7 +1971,37 @@ class MainWindow(tk.Tk):
             return f"{step.index}. confirm {step.values.get('message', '')}"
         if step.type == "arm_pose":
             return f"{step.index}. arm_pose pose={step.values.get('pose')}"
+        if step.type == "amr_connect":
+            return f"{step.index}. AMR connect"
+        if step.type == "amr_setobs":
+            return (
+                f"{step.index}. AMR precision "
+                f"xy={step.values.get('precision_xy')} "
+                f"yaw={step.values.get('precision_yaw')}"
+            )
+        if step.type == "amr_read_map":
+            return f"{step.index}. AMR map={step.values.get('map_name')}"
+        if step.type == "amr_goto":
+            return (
+                f"{step.index}. AMR goto={step.values.get('position_id')} "
+                f"timeout={step.values.get('response_timeout_seconds')}s "
+                f"arrival={step.values.get('arrival_xy')}m "
+                f"hold={step.values.get('hold_seconds')}s "
+                f"poll={step.values.get('poll_interval')}s"
+            )
+        if step.type == "amr_disconnect":
+            return f"{step.index}. AMR disconnect"
         return f"{step.index}. {step.type}"
+
+    def _task_file_is_amr_only(self) -> bool:
+        return bool(self._task_file_steps) and all(
+            step.type in AMR_TASK_TYPES for step in self._task_file_steps
+        )
+
+    def _task_file_requires_plc(self) -> bool:
+        return any(
+            step.type not in AMR_TASK_TYPES for step in self._task_file_steps
+        )
 
     def on_main_cycle_run_clicked(self) -> None:
         if self.main_cycle_phase == "ready_first_step":
@@ -2122,6 +2234,25 @@ class MainWindow(tk.Tk):
     ) -> None:
         if self._active_flow != flow_name:
             return
+        if flow_name == "amr":
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            message = str(data.get("message") or "AMR navigation cancelled")
+            self._finish_flow(
+                label,
+                {
+                    "ok": False,
+                    "data": {
+                        **data,
+                        "status": "cancelled",
+                        "state": "cancelled",
+                        "message": message,
+                    },
+                    "error": message,
+                },
+                None,
+                expected_flow="amr",
+            )
+            return
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         snapshot = data.get("flow") if isinstance(data.get("flow"), dict) else {}
         if data.get("already_finished") and self._finish_flow_from_snapshot(
@@ -2352,6 +2483,9 @@ class MainWindow(tk.Tk):
             self._set_vacuum_controls(not self._stop_unconfirmed)
             if not self._stop_unconfirmed:
                 self._refresh_all_vacuum()
+        elif self._task_file_is_amr_only() and not self._stop_unconfirmed:
+            self.btn_task_file_load.configure(state=tk.NORMAL)
+            self.btn_task_file_run.configure(state=tk.NORMAL)
 
         if request_error is not None:
             self.status_var.set(f"{label}請求失敗")
@@ -2912,6 +3046,16 @@ class MainWindow(tk.Tk):
                 control.configure(state=state)
         if enabled and not self._task_file_steps:
             self.btn_task_file_run.configure(state=tk.DISABLED)
+        self.btn_task_file_load.configure(
+            state=tk.DISABLED if self._active_flow is not None else tk.NORMAL
+        )
+        if (
+            self._active_flow is None
+            and self._task_file_steps
+            and not self._stop_unconfirmed
+            and (self._connected or not self._task_file_requires_plc())
+        ):
+            self.btn_task_file_run.configure(state=tk.NORMAL)
         if enabled:
             self._refresh_main_cycle_phase_ui()
 

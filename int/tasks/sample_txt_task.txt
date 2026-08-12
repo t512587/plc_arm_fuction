@@ -1,11 +1,26 @@
-# Sample TXT task for the PLC + arm UI.
+# AMR-only TXT task.
 # Load this file from the UI: TXT task file -> Load TXT -> Run TXT.
+# Each amr_goto advances only when the AMR API returns code=0 and msg=success.
 
 step
 type=control_settings
 x_speed=300
 y1_speed=400
 height_reference_depth_mm=630.0
+
+step
+type=amr_connect
+
+step
+type=amr_setobs
+precision_xy=0.03
+precision_yaw=0.087
+
+step
+type=amr_read_map
+map_name=170-0810
+
+
 
 step
 type=pallet
@@ -19,8 +34,13 @@ type=arm_pose
 pose=STANDBY
 
 step
-type=confirm
-message=Confirm Y1 suction is safe, then continue to vision transfer.
+type=amr_goto
+position_id=Point-d6uj6p
+response_timeout_seconds=180
+arrival_xy=0.10
+hold_seconds=0.8
+poll_interval=0.35
+
 
 step
 type=pallet
@@ -57,8 +77,12 @@ type=arm_pose
 pose=STANDBY
 
 step
-type=confirm
-message=Confirm Y1 suction is safe, then continue to vision transfer.
+type=amr_goto
+position_id=Point-d6uj6p
+response_timeout_seconds=180
+arrival_xy=0.10
+hold_seconds=0.8
+poll_interval=0.35
 
 step
 type=pallet
@@ -73,6 +97,9 @@ slot=Y1
 action=push
 height_mm=0
 forward_mm=0
+
+step
+type=amr_disconnect
 
 step
 type=confirm

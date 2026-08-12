@@ -13,6 +13,11 @@ TASK_TYPES = {
     "wait",
     "confirm",
     "arm_pose",
+    "amr_connect",
+    "amr_setobs",
+    "amr_read_map",
+    "amr_goto",
+    "amr_disconnect",
 }
 SLOTS = {"Y1", "Y2", "NONE"}
 ACTIONS = {"suck", "push", "none"}
@@ -139,6 +144,58 @@ def _validate_step(step: TaskStep) -> None:
                 f"step {step.index}: arm_pose must be HOME or STANDBY"
             )
         step.values["pose"] = pose
+    elif step.type in {"amr_connect", "amr_disconnect"}:
+        _reject_unknown_keys(step, {"type"})
+    elif step.type == "amr_setobs":
+        _reject_unknown_keys(step, {"type", "precision_xy", "precision_yaw"})
+        for key in ("precision_xy", "precision_yaw"):
+            value = _number(step, key)
+            if not math.isfinite(value) or value <= 0:
+                raise TaskFileError(
+                    f"step {step.index}: {key} must be greater than 0"
+                )
+            step.values[key] = f"{value:g}"
+    elif step.type == "amr_read_map":
+        _reject_unknown_keys(step, {"type", "map_name"})
+        step.values["map_name"] = _required(step, "map_name")
+    elif step.type == "amr_goto":
+        _reject_unknown_keys(
+            step,
+            {
+                "type", "position_id", "response_timeout_seconds",
+                "arrival_xy", "hold_seconds", "poll_interval",
+            },
+        )
+        step.values["position_id"] = _required(step, "position_id")
+        timeout = _number(step, "response_timeout_seconds")
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > 3600:
+            raise TaskFileError(
+                f"step {step.index}: response_timeout_seconds must be between 0 and 3600"
+            )
+        step.values["response_timeout_seconds"] = f"{timeout:g}"
+        step.values.setdefault("arrival_xy", "0.10")
+        step.values.setdefault("hold_seconds", "0.8")
+        step.values.setdefault("poll_interval", "0.35")
+        arrival_xy = _number(step, "arrival_xy")
+        if not math.isfinite(arrival_xy) or arrival_xy <= 0:
+            raise TaskFileError(f"step {step.index}: arrival_xy must be greater than 0")
+        hold_seconds = _number(step, "hold_seconds")
+        if not math.isfinite(hold_seconds) or hold_seconds < 0:
+            raise TaskFileError(f"step {step.index}: hold_seconds must be >= 0")
+        poll_interval = _number(step, "poll_interval")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise TaskFileError(f"step {step.index}: poll_interval must be greater than 0")
+        step.values["arrival_xy"] = f"{arrival_xy:g}"
+        step.values["hold_seconds"] = f"{hold_seconds:g}"
+        step.values["poll_interval"] = f"{poll_interval:g}"
+
+
+def _reject_unknown_keys(step: TaskStep, allowed: set[str]) -> None:
+    unknown = sorted(set(step.values) - allowed)
+    if unknown:
+        raise TaskFileError(
+            f"step {step.index}: unsupported field(s): {', '.join(unknown)}"
+        )
 
 
 def _validate_control_settings(step: TaskStep) -> None:
