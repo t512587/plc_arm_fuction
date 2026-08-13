@@ -1,0 +1,16 @@
+[project]
+name = "int-amr-canbus"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "pymcprotocol>=0.3.0",
+    "pyrealsense2>=2.56",
+    "pyyaml>=6.0",
+    "pyserial>=3.5",
+    "python-can[serial]>=4.4.0",
+    "requests>=2.32",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.1",
+]

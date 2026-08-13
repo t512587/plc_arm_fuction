@@ -1,0 +1,6 @@
+pulse_seconds: 0.2
+poll_interval_seconds: 0.2
+timeout_seconds: 90.0
+position_tolerance_mm: 0.0
+stable_read_count: 3
+read_error_limit: 3

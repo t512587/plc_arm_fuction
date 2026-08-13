@@ -1,0 +1,9 @@
+AMRconnect()
+AMRsetobs(0.03,0.087)
+AMRread_map("170-0810")
+
+AMRgoto_position("Point-d6uj6p")  # 第 1 點
+hunam_ctrl()                      # 確認已抵達後按 Enter
+
+
+AMRdisconnect()

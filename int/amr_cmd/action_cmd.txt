@@ -1,0 +1,91 @@
+action.py 可呼叫指令
+====================
+
+PLC
+---
+PLCconnect(plc_name="main_plc")
+PLCdisconnect(plc_name="main_plc")
+PLCback_home(timeout=60.0)
+PLCmove_to(position, action, height, depth, timeout=60.0)
+  position: "left"、"right"、"none"
+  action: "pull"、"push"、"none"
+PLCmove_to_x(height, timeout=60.0)
+PLCvacuum(position, action, time_ms)
+  position: "Y1"、"Y2"、"X"
+  action: "ON"、"OFF"
+  time_ms: 0 表示持續輸出，正整數表示輸出指定毫秒數，-1 表示停止
+
+CANbus
+------
+BUSconnect()
+BUSdisconnect()
+BUSread_positions()
+BUSread_position_values()
+BUSgo_to_point(point_name, current_positions=None)
+  point_name: "HOME"、"STANDBY"、"MOVE"、"LView"、"RView"、"LGrap"、"RGrap"
+  current_positions: 例如 {"ID 142": 6.0, "ID 143": -22.93}
+BUSstop_all()
+BUSshutdown_all()
+BUScalculate_vacuum_angles(direction, offset_cm)
+BUSmove_vacuum_dynamic(direction, offset_cm, current_positions=None)
+
+D435i
+-----
+D435connect()
+D435disconnect()
+D435start_rgbd(width=640, height=480, fps=30)
+D435capture_rgbd(warmup_frames=15, timeout_ms=1000)
+D435stop_rgbd()
+D435detect_suction_point(view="LView", depth_range=None, use_default_depth_range=True)
+D435calculate_suction_target(view=None)
+D435save_results()
+D435confirm_home(tolerance=1.0, stable_reads=3, timeout=15.0, poll=0.2)
+D435move_home_component(component, settle=2.5, tolerance=1.0, stable_reads=3, timeout=15.0, poll=0.2)
+  component: "arm"、"camera"、"small"、"big"
+D435move_named_pose(pose, settle=2.5, tolerance=1.0, stable_reads=3, timeout=15.0, poll=0.2)
+  pose: "HOME"、"STANDBY"、"MOVE"、"LView"、"RView"、"LGrap"、"RGrap"
+D435detect(view="LView", depth_range=None, move_camera=True, settle=2.5, home_tolerance=1.0, home_stable_reads=3, home_timeout=15.0, home_poll=0.2, use_default_depth_range=True)
+  執行後會將 view、found、suction_pixel(u/v/depth_m)、camera_xyz_cm(x/y/z) 儲存為本次程式的共用參數。
+D435detect_suction_point_v2(target_speed=200, tolerance=1.0, stable_reads=2, timeout=20.0, poll=0.3)
+  使用最近一次 D435detect() 的共用參數執行 calibrate_v2 流程。
+  LView 且 found=true：以 calibrate_v2 三維內插計算 ID142/143、移動並確認到位，接著執行右側外分支流程並回 HOME。
+  RView 且 found=true：回傳「暫時還沒寫」，不移動。
+  found=false：回傳「沒有抓取物品」，不移動。
+D435execute_pick_place(view="LView", depth_range=None, target_speed=200, settle=2.5, target_wait=2.0, pick_wait=2.0, home_tolerance=1.0, home_stable_reads=3, home_timeout=15.0, home_poll=0.2, use_default_depth_range=True)
+D435stop_all()
+
+AMR
+---
+AMRconnect()
+  以控制盒心跳確認 AMR 是否連線成功。
+AMRdisconnect()
+  結束 action 端的 AMR 連線狀態；不會停止目前的導航任務。
+AMRread_map(map_name)
+  map_name: 地圖名稱，必須與 AMR 地圖清單中的名稱完全相同。
+  例如：AMRread_map("factory_map")
+AMRgoto_position(position_id)
+  position_id: 地圖 waypoint 的位置 ID（wp_uid）。
+  送出導航後會持續等待 FSM；moving 表示仍在移動中，只有 succeeded 或 failed 才結束。
+  最終 FSM 與 robot_data 會顯示在 UI；若 failed/fail，會自動呼叫 AMRconfirm_status()。
+  例如：AMRgoto_position("position-001")
+AMRcancel_task()
+  取消 AMR 目前任務。
+AMRconfirm_status()
+  確認（清除）AMR 的 succeeded/failed 最終狀態。
+
+流程控制
+--------
+sleep(t)
+  暫停 Action 流程 t 毫秒，等待結束後繼續執行下一個指令。
+  t: 大於或等於 0 的整數或小數，單位為毫秒。
+  例如：sleep(1500) 會等待 1.5 秒。
+hunam_ctrl()
+  暫停 Action 流程，等待使用者在終端按下 Enter 後繼續執行。
+  指令名稱依程式介面使用 hunam_ctrl（保留 hunam 拼字）。
+
+補充
+----
+- view 可用 "LView" 或 "RView"。
+- depth_range 格式例如 (0.60, 0.82)；設為 None 時依 use_default_depth_range 決定是否使用預設範圍。
+- action.txt 每行只能放一個上述函式呼叫；參數只能使用字串、數字、布林、None、list、tuple 或 dict。
+- 可先執行 `python3 action.py --dry-run`，只驗證及顯示 action.txt，不控制硬體。

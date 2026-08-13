@@ -1,0 +1,9 @@
+# PLC 連線設定
+
+connections:
+  - name: main_plc
+    host: 192.168.3.250
+    port: 5000
+    protocol: mc
+    unit: 0
+

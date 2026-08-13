@@ -1,0 +1,7 @@
+target_height_mm: 560.0
+tolerance_mm: 1.0
+stable_read_count: 3
+poll_interval_seconds: 0.1
+vacuum_build_seconds: 0.5
+settle_seconds: 0.5
+timeout_seconds: 30.0

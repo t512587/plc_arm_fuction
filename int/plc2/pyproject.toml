@@ -1,0 +1,19 @@
+[project]
+name = "python-plc"
+version = "0.2.4"
+description = "Mitsubishi PLC monitor and control sample with FastAPI and Tkinter."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "pymcprotocol",
+    "pyyaml",
+    "requests",
+    "uvicorn",
+]
+
+[project.scripts]
+python-plc = "main:main"
+
+[tool.uv]
+package = false

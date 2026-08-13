@@ -1,0 +1,19 @@
+# Python >=3.10,<3.13
+
+# Vision and Intel RealSense cameras
+numpy>=2.0
+opencv-python>=4.10
+pyrealsense2>=2.56
+
+# PLC and configuration
+pymcprotocol>=0.3.0
+PyYAML>=6.0
+
+# CAN bus and serial communication
+python-can[serial]>=4.4.0
+pyserial>=3.5
+
+# HTTP clients and PLC2 API service
+requests>=2.32
+fastapi
+uvicorn
