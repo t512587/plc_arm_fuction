@@ -6,7 +6,7 @@ step
 type=control_settings
 x_speed=300
 y1_speed=400
-height_reference_depth_mm=615.0
+height_reference_depth_mm=611.0
 
 step
 type=amr_connect
@@ -21,7 +21,7 @@ precision_yaw=0.087
 
 step
 type=amr_read_map
-map_name=170-0810
+map_name=0814-3
 
 
 step
@@ -37,7 +37,7 @@ pose=STANDBY
 
 step
 type=amr_goto
-position_id=Point-d6uj6p
+position_id=Point-677kjo
 is_reverse=False
 nav_type=2
 poll_interval=0.35
@@ -48,7 +48,7 @@ type=pallet
 slot=Y1
 action=suck
 height_mm=175
-forward_mm=120
+forward_mm=400
 
 step
 type=pallet
@@ -59,7 +59,7 @@ forward_mm=0
 
 step
 type=amr_goto
-position_id=Point-ylo9sn
+position_id=Point-xmb6ss
 is_reverse=True
 nav_type=2
 poll_interval=0.35
@@ -82,7 +82,7 @@ pose=STANDBY
 
 step
 type=amr_goto
-position_id=Point-d6uj6p
+position_id=Point-677kjo
 is_reverse=False
 nav_type=2
 poll_interval=0.35
@@ -91,8 +91,8 @@ step
 type=pallet
 slot=Y1
 action=push
-height_mm=180
-forward_mm=120
+height_mm=178
+forward_mm=400
 
 step
 type=pallet
@@ -104,7 +104,7 @@ forward_mm=0
 
 step
 type=amr_goto
-position_id=Point-ylo9sn
+position_id=Point-xmb6ss
 is_reverse=True
 nav_type=2
 poll_interval=0.35

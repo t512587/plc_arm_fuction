@@ -155,8 +155,10 @@ class MotorService:
             handle.close()
             raise RuntimeError(
                 "CAN channel is already in use by another local process: "
-                f"{self.config.channel}. Close 2motor_sync.py, d435_control.py, "
-                "or the other action_main.py instance before retrying."
+                f"{self.config.channel}. If canbus_daemon.py is running, stop it "
+                "first (it holds the channel for the whole session); otherwise "
+                "close 2motor_sync.py or the other process using this channel "
+                "before retrying."
             ) from exc
         self._channel_lock_file = handle
         self._channel_lock_path = path
