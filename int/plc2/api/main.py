@@ -536,15 +536,23 @@ async def plc_connect(plc: str = "main_plc") -> APIResponse:
     logger.info("API /plc/connect plc=%s", plc)
     try:
         PLC_MANAGER.connect(plc)
-        SLOT_VACUUM_SERVICE.enforce_required_vacuum()
-    except HTTPException:
-        raise
-    except (PLCConnectionError, PlcServiceError, SlotVacuumServiceError) as exc:
+    except (PLCConnectionError, PlcServiceError) as exc:
         logger.error("PLC 連線失敗 plc=%s error=%s", plc, exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
+
+    # enforce_required_vacuum() re-applies vacuum left over from a previous
+    # session; it is a best-effort follow-up, not part of the PLC TCP
+    # connection itself, so a failure here must not report the (successful)
+    # connect as a 503 -- surface it as a warning instead.
+    vacuum_warning: str | None = None
+    try:
+        SLOT_VACUUM_SERVICE.enforce_required_vacuum()
+    except (PlcServiceError, SlotVacuumServiceError) as exc:
+        logger.warning("PLC 已連線，但真空回補檢查失敗 plc=%s error=%s", plc, exc)
+        vacuum_warning = str(exc)
 
     plc_def = CONFIG_STORE.get_plc(plc)
     return APIResponse(
@@ -555,6 +563,7 @@ async def plc_connect(plc: str = "main_plc") -> APIResponse:
             "host": plc_def.host if plc_def is not None else None,
             "port": plc_def.port if plc_def is not None else None,
             "unit": plc_def.unit if plc_def is not None else None,
+            "vacuum_warning": vacuum_warning,
         },
     )
 

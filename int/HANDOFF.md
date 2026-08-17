@@ -10,14 +10,10 @@
 
 | 檔案 | 角色 |
 |---|---|
-| `start_daemons.py` | **一鍵啟動器**。同時啟動 `d435_camera_daemon.py` 跟 `canbus_daemon.py` 兩個常駐服務（各自獨立process，一個掛掉不影響另一個），統一印出兩邊的log，Ctrl+C時兩個都乾淨關閉。**使用相機或手臂功能之前，請先執行 `python start_daemons.py`**。 |
-| `d435_camera_daemon.py` | **相機常駐服務**。獨立進程，開機時開一次 RealSense pipeline 並持續串流，背景快取最新一張對齊後的 RGB-D 畫面，透過本機 HTTP（預設 `127.0.0.1:8756`）的 `/frame`、`/health` 提供給其他程式抓取，避免每次拍照都重開相機。 |
-| `canbus_daemon.py` | **CAN匯流排常駐服務**。獨立進程，開機時 `ArmController.connect()` 一次並持續保持連線，透過本機 HTTP（預設 `127.0.0.1:8757`）提供讀角度、移動到點位、單軸移動、停止/關閉馬達等指令，避免每次手臂動作都重新開序列埠、重跑「Warming up CAN adapter (1s)」暖機。 |
-| `canbus/remote_arm_controller.py` | `RemoteArmController`／`RemoteMotorService`：跟 `canbus/arm_controller.py`／`canbus/motor_service.py` 介面完全相容的HTTP替身，`d435_control.py` 用它取代直接建立 `ArmController()`，改成向 `canbus_daemon.py` 下指令。 |
-| `d435_control.py` | **手臂主程式**。控制 D435i 拍 RGB-D（實際畫面向 `d435_camera_daemon.py` 用 HTTP 索取），呼叫 SAM2 suction-hotspot server 取得吸取點，用 calibration model 把 camera x/y 轉成 ID142/ID143 目標角度，透過 `RemoteArmController` 向 `canbus_daemon.py` 下達馬達指令。支援 LView（左取右放）和 RView（右取左放）雙方向。若相機或CAN常駐服務未啟動，相關動作會直接拋出明確錯誤，不會自己另開一個 pipeline/序列埠。 |
-| `calibration_ui.py` | 校正採點 Tkinter UI。呼叫主程式做 detect，顯示 `control_result.png`，讓使用者用 `2motor_sync.py` 手動對齊後輸入實際角度，存入 CSV。**同樣依賴兩個常駐服務已啟動**，因為它是透過 `d435_control.py` 拍照跟動手臂。 |
+| `d435_control.py` | **手臂主程式**。控制 D435i 拍 RGB-D，呼叫 SAM2 suction-hotspot server 取得吸取點，用 calibration model 把 camera x/y 轉成 ID142/ID143 目標角度，透過 canbus/ 控制四顆馬達。支援 LView（左取右放）和 RView（右取左放）雙方向。 |
+| `calibration_ui.py` | 校正採點 Tkinter UI。呼叫主程式做 detect，顯示 `control_result.png`，讓使用者用 `2motor_sync.py` 手動對齊後輸入實際角度，存入 CSV。 |
 | `calibration_fit_cli.py` | 把校正 CSV fit 成二次多項式 calibration coefficients 的 CLI 工具。 |
-| `action_main.py` | 整合 PLC + D435 UI 的啟動入口，載入 `plc2/main.py`。**不會自動啟動常駐服務**，`vision_transfer` 相關流程要用相機/手臂前，仍需另外手動執行 `start_daemons.py`（樹莓派上長期部署可考慮之後另外設定 systemd 開機自動啟動）。 |
+| `action_main.py` | 整合 PLC + D435 UI 的啟動入口，載入 `plc2/main.py`。 |
 
 ### 1.2 canbus/ 模組
 
@@ -36,7 +32,7 @@
 
 | 檔案 | 角色 |
 |---|---|
-| `plc2/service/arm_vision_workflow_service.py` | **關鍵**：後端透過 subprocess 呼叫 `d435_control.py`，傳入 `--move-home-only`、`--home-tolerance` 等 CLI 參數。所有手臂動作都需要 `canbus_daemon.py` 已在背景執行；`vision_transfer`（`--execute`）額外需要 `d435_camera_daemon.py`。 |
+| `plc2/service/arm_vision_workflow_service.py` | **關鍵**：後端透過 subprocess 呼叫 `d435_control.py`，傳入 `--move-home-only`、`--home-tolerance` 等 CLI 參數 |
 | `plc2/config/services.yml` | `arm_vision_workflow.script_path` 指向 `d435_control.py` |
 | `plc2/flow/main_cycle_flow.py` | 主循環流程引擎 |
 | `plc2/api/main.py` | FastAPI 路由 |

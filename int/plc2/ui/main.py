@@ -1236,6 +1236,14 @@ class MainWindow(tk.Tk):
         self._set_vacuum_controls(True)
         self._refresh_all_vacuum()
 
+        vacuum_warning = data.get("vacuum_warning")
+        if vacuum_warning:
+            messagebox.showwarning(
+                "已連線，但真空回補失敗",
+                f"PLC 已連線，但上次留下的真空狀態回補檢查失敗：\n{vacuum_warning}",
+                parent=self,
+            )
+
         selection = self.group_list.curselection()
         if selection:
             self._show_group(self.group_list.get(selection[0]))

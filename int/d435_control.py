@@ -2,9 +2,8 @@
 """
 d435_control.py — Vision-guided suction arm control (dual direction)
 
-Uses canbus/remote_arm_controller.py (RemoteArmController) to send motor
-commands to the persistent canbus_daemon.py process instead of opening the
-CAN connection itself.
+Uses canbus/ library (ArmController + MotorService + waveshare_usbcana)
+for motor control instead of raw python-can.
 
 Flow:
   LView execute:
@@ -47,6 +46,7 @@ import time
 from pathlib import Path
 
 import requests
+import pyrealsense2 as rs
 
 # cv2/numpy are only needed by the vision/detection code paths, not by the
 # pure-arm-motion paths (--move-pose-only / --move-home-only /
@@ -77,13 +77,13 @@ CANBUS_DIR = BASE_DIR / "canbus"
 if str(CANBUS_DIR) not in sys.path:
     sys.path.insert(0, str(CANBUS_DIR))
 
+from arm_controller import ArmController  # noqa: E402
 from arm_config import (  # noqa: E402
     HOME_SPEED_DPS,
     MAX_MOVE_DEGREES,
     MOTORS,
     MOTOR_ANGLE_LIMITS,
 )
-from remote_arm_controller import RemoteArmController  # noqa: E402
 
 
 # ===========================================================================
@@ -96,19 +96,6 @@ SERVER_URL = "https://demo.bizlion.com.tw/tmts/suction-hotspot/detect"
 SERVER_AUTH = ("tmts", "N1++jI8eBOLTogEL0gLz5ehBhTqv50cjKonThISlrQo=")
 #SERVER_URL = "http://192.168.50.233:8000/detect"
 #SERVER_AUTH = None
-
-# Persistent camera daemon (see d435_camera_daemon.py). It owns the RealSense
-# pipeline; this script only fetches the latest frame over HTTP so multiple
-# callers (main flow, CLI auto-transfer, calibration UI) never fight over the
-# same USB device.
-CAMERA_DAEMON_URL = "http://127.0.0.1:8756"
-CAMERA_DAEMON_TIMEOUT_SECONDS = 5.0
-
-# Persistent CAN-bus daemon (see canbus_daemon.py). It owns the one live CAN
-# connection for the whole session; this script sends commands to it over
-# HTTP via RemoteArmController instead of reconnecting to the serial port
-# on every run.
-CANBUS_DAEMON_URL = "http://127.0.0.1:8757"
 
 # Default depth filter sent to server, per view.
 # Unit: meters.
@@ -331,51 +318,67 @@ def save_depth_visualization(depth_raw: np.ndarray, filename: str) -> None:
 
 
 def capture_realsense_frame() -> tuple[np.ndarray, np.ndarray, float, dict]:
-    """Fetch one aligned RGB-D frame from the persistent camera daemon.
+    """Capture one aligned RGB-D frame and return color intrinsics.
 
     Returns:
         color_bgr, depth_raw, depth_scale, intrinsics
         intrinsics = {"fx": float, "fy": float, "cx": float, "cy": float}
-
-    Raises:
-        RuntimeError: the camera daemon (d435_camera_daemon.py) is not
-            reachable or has no frame ready yet. This script never opens the
-            RealSense pipeline itself, so it does not silently fall back to
-            a second pipeline that would fight the daemon for the device.
     """
-    print(f"[INFO] Requesting frame from camera daemon at {CAMERA_DAEMON_URL} ...")
+    pipeline = rs.pipeline()
+    config = rs.config()
+
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+    print("[INFO] Starting RealSense pipeline...")
+    profile = pipeline.start(config)
+
     try:
-        response = requests.get(
-            f"{CAMERA_DAEMON_URL}/frame",
-            timeout=CAMERA_DAEMON_TIMEOUT_SECONDS,
+        depth_sensor = profile.get_device().first_depth_sensor()
+        depth_scale = float(depth_sensor.get_depth_scale())
+        print(f"[INFO] depth_scale = {depth_scale}")
+
+        color_profile = profile.get_stream(rs.stream.color)
+        intr = color_profile.as_video_stream_profile().get_intrinsics()
+        intrinsics = {
+            "fx": float(intr.fx),
+            "fy": float(intr.fy),
+            "cx": float(intr.ppx),
+            "cy": float(intr.ppy),
+        }
+        print(
+            f"[INFO] intrinsics: fx={intr.fx:.2f} fy={intr.fy:.2f} "
+            f"cx={intr.ppx:.2f} cy={intr.ppy:.2f}"
         )
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            "找不到相機常駐服務，請先啟動 d435_camera_daemon.py "
-            f"(url={CAMERA_DAEMON_URL}): {exc}"
-        ) from exc
 
-    color_png = base64.b64decode(payload["color_png_base64"])
-    depth_png = base64.b64decode(payload["depth_png_base64"])
-    color_bgr = cv2.imdecode(np.frombuffer(color_png, dtype=np.uint8), cv2.IMREAD_COLOR)
-    depth_raw = cv2.imdecode(np.frombuffer(depth_png, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-    if color_bgr is None or depth_raw is None:
-        raise RuntimeError("相機常駐服務回傳的畫面無法解碼")
+        align = rs.align(rs.stream.color)
 
-    depth_scale = float(payload["depth_scale"])
-    intrinsics = dict(payload["intrinsics"])
+        print("[INFO] Warming up camera...")
+        for _ in range(15):
+            pipeline.wait_for_frames(timeout_ms=1000)
 
-    print(f"[INFO] color shape = {color_bgr.shape}, dtype = {color_bgr.dtype}")
-    print(f"[INFO] depth shape = {depth_raw.shape}, dtype = {depth_raw.dtype}")
-    print(f"[INFO] depth min/max = {depth_raw.min()} / {depth_raw.max()}")
-    print(
-        f"[INFO] frame captured_at={payload.get('captured_at')} "
-        f"(daemon-cached, age not re-warmed)"
-    )
+        print("[INFO] Capturing one aligned RGB-D frame...")
+        frames = pipeline.wait_for_frames(timeout_ms=1000)
+        aligned_frames = align.process(frames)
 
-    return color_bgr, depth_raw, depth_scale, intrinsics
+        depth_frame = aligned_frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+
+        if not depth_frame or not color_frame:
+            raise RuntimeError("Failed to get color/depth frame")
+
+        color_bgr = np.asanyarray(color_frame.get_data())
+        depth_raw = np.asanyarray(depth_frame.get_data())
+
+        print(f"[INFO] color shape = {color_bgr.shape}, dtype = {color_bgr.dtype}")
+        print(f"[INFO] depth shape = {depth_raw.shape}, dtype = {depth_raw.dtype}")
+        print(f"[INFO] depth min/max = {depth_raw.min()} / {depth_raw.max()}")
+
+        return color_bgr, depth_raw, depth_scale, intrinsics
+
+    finally:
+        print("[INFO] Stopping RealSense pipeline...")
+        pipeline.stop()
 
 def call_detection_server(
     color_bgr: np.ndarray,
@@ -510,10 +513,10 @@ def validate_suction_object_info(object_info: dict) -> list[str]:
 
 
 # ===========================================================================
-# Motor helpers  (using RemoteArmController, backed by canbus_daemon.py)
+# Motor helpers  (using ArmController from canbus/arm_controller.py)
 # ===========================================================================
 
-def read_current_angles(controller: RemoteArmController) -> dict[str, float]:
+def read_current_angles(controller: ArmController) -> dict[str, float]:
     """Read all motor angles. Returns {"ID 142": float, ...}."""
     result = controller.read_positions()
     updates = result.get("_updates", {})
@@ -537,7 +540,7 @@ def verify_required_motors_online(angles: dict[str, float]) -> None:
 
 
 def wait_until_named_pose(
-    controller: RemoteArmController,
+    controller: ArmController,
     point_name: str,
     *,
     tolerance_degrees: float,
@@ -581,7 +584,7 @@ def wait_until_named_pose(
 
 
 def wait_until_target_angles(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_name: str,
     targets: dict[str, float],
     *,
@@ -647,7 +650,7 @@ def wait_until_target_angles(
 
 
 def confirm_target_angles(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_name: str,
     targets: dict[str, float],
     *,
@@ -673,7 +676,7 @@ def confirm_target_angles(
 
 
 def confirm_home_pose(
-    controller: RemoteArmController,
+    controller: ArmController,
     *,
     tolerance_degrees: float,
     stable_reads: int,
@@ -709,7 +712,7 @@ def confirm_home_pose(
 
 
 def move_component_home_pose(
-    controller: RemoteArmController,
+    controller: ArmController,
     component: str,
     *,
     settle_sec: float,
@@ -792,7 +795,7 @@ def move_component_home_pose(
 
 
 def move_named_pose(
-    controller: RemoteArmController,
+    controller: ArmController,
     point_name: str,
     *,
     settle_sec: float,
@@ -855,7 +858,7 @@ def move_named_pose(
     return angles
 
 
-def stop_all_motors_confirmed(controller: RemoteArmController) -> bool:
+def stop_all_motors_confirmed(controller: ArmController) -> bool:
     """Stop all four motors and report whether every stop command succeeded."""
     result = controller.stop_all()
     for key, value in result.items():
@@ -875,7 +878,7 @@ def stop_all_motors_confirmed(controller: RemoteArmController) -> bool:
 
 
 def safe_go_to_point(
-    controller: RemoteArmController,
+    controller: ArmController,
     point_name: str,
     settle_sec: float,
 ) -> None:
@@ -954,7 +957,7 @@ def check_angle_limits(motor_label: str, angle: float, view: str = "LView") -> N
 
 
 def move_single_motor_angle(
-    controller: RemoteArmController,
+    controller: ArmController,
     motor_label: str,
     angle: float,
     target_speed_dps: int,
@@ -976,7 +979,7 @@ def move_single_motor_angle(
 
 
 def retract_small_arm_to_safe(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_speed_dps: int,
     settle_sec: float,
 ) -> None:
@@ -1001,7 +1004,7 @@ def retract_small_arm_to_safe(
 
 
 def move_to_target_angles(
-    controller: RemoteArmController,
+    controller: ArmController,
     view: str,
     target_angles: dict[str, float],
     target_speed_dps: int,
@@ -1061,7 +1064,7 @@ def move_to_target_angles(
 
 
 def retract_to_lgrap(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_speed_dps: int,
     settle_sec: float,
 ) -> None:
@@ -1124,7 +1127,7 @@ def check_general_motor_limits(motor_label: str, angle: float) -> None:
 
 
 def move_single_motor_angle_general(
-    controller: RemoteArmController,
+    controller: ArmController,
     motor_label: str,
     angle: float,
     target_speed_dps: int,
@@ -1145,7 +1148,7 @@ def move_single_motor_angle_general(
         time.sleep(settle_sec)
 
 
-def get_home_angles(controller: RemoteArmController, home_point: str = "HOME") -> dict[str, float]:
+def get_home_angles(controller: ArmController, home_point: str = "HOME") -> dict[str, float]:
     """Read saved HOME angles from point_config.json."""
     home = controller.point_config.get(home_point, {})
     if not home:
@@ -1159,7 +1162,7 @@ def get_home_angles(controller: RemoteArmController, home_point: str = "HOME") -
     return {label: float(home[label]) for label in required}
 
 
-def get_id143_outer_mid_angle(controller: RemoteArmController) -> float:
+def get_id143_outer_mid_angle(controller: ArmController) -> float:
     """Compute the small-arm outside transfer angle from HOME.
 
     Rule agreed on-site:
@@ -1176,7 +1179,7 @@ def get_id143_outer_mid_angle(controller: RemoteArmController) -> float:
 
 
 def move_id143_to_outer_mid(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_speed_dps: int,
     settle_sec: float,
 ) -> None:
@@ -1193,7 +1196,7 @@ def move_id143_to_outer_mid(
 
 
 def compute_right_outer_branch_angles(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_angles: dict[str, float],
     home_point: str = "HOME",
 ) -> dict[str, float]:
@@ -1246,7 +1249,7 @@ def compute_right_outer_branch_angles(
     return right_angles
 
 def move_to_right_outer_branch_pose_via_outer_mid(
-    controller: RemoteArmController,
+    controller: ArmController,
     right_angles: dict[str, float],
     target_speed_dps: int,
     settle_sec: float,
@@ -1275,7 +1278,7 @@ def move_to_right_outer_branch_pose_via_outer_mid(
 
 
 def return_home_from_right_outer_branch_via_outer_mid(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_speed_dps: int,
     settle_sec: float,
 ) -> None:
@@ -1308,7 +1311,7 @@ def return_home_from_right_outer_branch_via_outer_mid(
 
 
 
-def get_id143_outer_mid_angle_plus(controller: RemoteArmController) -> float:
+def get_id143_outer_mid_angle_plus(controller: ArmController) -> float:
     """Compute the positive-side outside transfer angle from HOME.
 
     RView right→left route uses the symmetric outside branch:
@@ -1325,7 +1328,7 @@ def get_id143_outer_mid_angle_plus(controller: RemoteArmController) -> float:
 
 
 def move_id143_to_outer_mid_plus(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_speed_dps: int,
     settle_sec: float,
 ) -> None:
@@ -1342,7 +1345,7 @@ def move_id143_to_outer_mid_plus(
 
 
 def compute_left_outer_branch_angles(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_angles: dict[str, float],
     home_point: str = "HOME",
 ) -> dict[str, float]:
@@ -1397,7 +1400,7 @@ def compute_left_outer_branch_angles(
 
 
 def move_to_left_outer_branch_pose_via_outer_mid(
-    controller: RemoteArmController,
+    controller: ArmController,
     left_angles: dict[str, float],
     target_speed_dps: int,
     settle_sec: float,
@@ -1426,7 +1429,7 @@ def move_to_left_outer_branch_pose_via_outer_mid(
 
 
 def return_home_from_left_outer_branch_via_outer_mid(
-    controller: RemoteArmController,
+    controller: ArmController,
     target_speed_dps: int,
     settle_sec: float,
 ) -> None:
@@ -1491,7 +1494,7 @@ def build_route_plan(view: str) -> list[str]:
 # ===========================================================================
 
 def run_post_detection_pick_flow(
-    controller: RemoteArmController,
+    controller: ArmController,
     view: str,
     target_angles: dict[str, float],
     settle_sec: float,
@@ -1828,9 +1831,11 @@ def main() -> None:
         or args.move_home_only
         or args.move_pose_only
     ):
-        controller = RemoteArmController(CANBUS_DAEMON_URL)
+        controller = ArmController()
         try:
             print(f"[INFO] {controller.connect()}")
+            print("[INFO] Warming up CAN adapter (1s)...")
+            time.sleep(1.0)
 
             if hasattr(controller.service, "_serial") and controller.service._serial:
                 controller.service._serial.reset_input_buffer()
@@ -1892,7 +1897,7 @@ def main() -> None:
         depth_range = DEPTH_RANGE_BY_VIEW.get(view)
 
     roi = ROI_BY_VIEW[view]
-    controller: RemoteArmController | None = None
+    controller: ArmController | None = None
 
     def handle_termination(signum, _frame) -> None:
         if controller is not None:
@@ -1921,9 +1926,15 @@ def main() -> None:
             ):
                 return
 
-            controller = RemoteArmController(CANBUS_DAEMON_URL)
+            controller = ArmController()
             connect_msg = controller.connect()
             print(f"[INFO] {connect_msg}")
+
+            # Waveshare USB-CAN-A needs warm-up after configuration.
+            # In the GUI, users naturally wait between Connect and first
+            # command; in script mode we must add an explicit delay.
+            print("[INFO] Warming up CAN adapter (1s)...")
+            time.sleep(1.0)
 
             # Flush any stale bytes left in serial RX buffer
             if hasattr(controller.service, '_serial') and controller.service._serial:
