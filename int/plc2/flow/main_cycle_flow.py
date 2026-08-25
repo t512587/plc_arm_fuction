@@ -32,6 +32,7 @@ except ModuleNotFoundError:
 LOGGER = logging.getLogger(__name__)
 SECOND_STEP_MAXIMUM_HEIGHT_MM = ARM_CAMERA_NOT_HOME_MAXIMUM_HEIGHT_MM
 SECOND_STEP_ARM_MOTION_SAFE_HEIGHT_MM = 560.0
+SECOND_STEP_ARM_PICK_APPROACH_HEIGHT_MM = 460.0
 
 
 class LiftServiceProtocol(Protocol):
@@ -825,9 +826,36 @@ class MainCycleFlow(LifecycleTracked):
             if self.arm_vision_service is not None:
                 step = "step2_arm_vision_pick_place"
                 released_at_cross_side_height = False
+                descended_to_pick_approach_height = False
 
                 def movement_handoff(movement: str) -> None:
-                    nonlocal height, step
+                    nonlocal height, step, descended_to_pick_approach_height
+                    if "Lower to pick-approach height" in movement:
+                        step = "step2_descend_to_pick_approach_height"
+                        height = self._move_height(
+                            SECOND_STEP_ARM_PICK_APPROACH_HEIGHT_MM,
+                            cancel_event,
+                            lambda message: report(
+                                f"第二步拍照後下降至撿貨接近高度：{message}"
+                            ),
+                            speed=x_speed,
+                        )
+                        height = self._confirm_stopped_height(
+                            SECOND_STEP_ARM_PICK_APPROACH_HEIGHT_MM,
+                            cancel_event,
+                            lambda message: report(
+                                f"第二步撿貨接近高度確認：{message}"
+                            ),
+                        )
+                        descended_to_pick_approach_height = True
+                        report(
+                            f"第二步：升降機已停止並確認在 "
+                            f"{SECOND_STEP_ARM_PICK_APPROACH_HEIGHT_MM:g}"
+                            f"±{self.config.height_tolerance_mm:g}mm，"
+                            f"放行手臂前往撿貨位置"
+                        )
+                        return
+
                     step = "step2_confirm_safe_height_before_arm_motion"
                     required_height_mm = (
                         cross_side_height_mm
@@ -837,7 +865,11 @@ class MainCycleFlow(LifecycleTracked):
                             or "Move left target" in movement
                             or "Move right target" in movement
                         )
-                        else vision_height_mm
+                        else (
+                            SECOND_STEP_ARM_PICK_APPROACH_HEIGHT_MM
+                            if descended_to_pick_approach_height
+                            else vision_height_mm
+                        )
                     )
                     height = self._confirm_stopped_height(
                         required_height_mm,

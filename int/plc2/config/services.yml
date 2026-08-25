@@ -102,8 +102,11 @@ services:
     target_wait_seconds: 2.0
     pick_wait_seconds: 2.0
     vision_height_mm: 560.0
-    height_reference_depth_mm: 620.0
-    # 深度大於此門檻才套用 Z*1000-620+560；小於或等於時直接採用實測深度（m→mm）。
+    height_reference_depth_mm: 700.0
+    # 深度大於此門檻才套用 Z*1000-700+560；小於或等於時直接採用實測深度（m→mm）。
+    # vision_height_mm 是拍照當下相機實際所在高度（560，未變）。PLC 拍完照後
+    # 會先降到 SECOND_STEP_ARM_PICK_APPROACH_HEIGHT_MM(460) 這個中間停點，
+    # 再從那裡移動到這個公式算出來的最終撿貨高度。
     height_formula_minimum_depth_m: 0.650
     startup_timeout_seconds: 30.0
     no_output_timeout_seconds: 90.0

@@ -1,35 +1,39 @@
-# TXT task example.
-# Supported type values:
-#   pallet, vision_transfer, home, wait, confirm, arm_pose
+step
+type=control_settings
+x_speed=300
+y1_speed=400
+height_reference_depth_mm=690.0
 
 step
-type=arm_pose
-pose=HOME
+type=amr_connect
+
+step
+type=amr_confirm_status
+
 
 step
 type=pallet
 slot=Y1
 action=suck
-height_mm=560
-forward_mm=120
+height_mm=0
+forward_mm=0
+
 
 step
-type=confirm
-message=Confirm the Y1 pallet action is safe before vision transfer.
+type=arm_pose
+pose=STANDBY
 
 step
 type=vision_transfer
 transfer_direction=Y1_TO_Y2
-# Repeat this complete vision-transfer cycle three times.
-repeat=3
+repeat=4
 
 step
-type=wait
-seconds=1
+type=amr_cancel_task
 
 step
-type=pallet
-slot=Y2
-action=push
-height_mm=560
-forward_mm=120
+type=amr_disconnect
+
+step
+type=confirm
+message=Confirm the finished workpiece position before ending the task.

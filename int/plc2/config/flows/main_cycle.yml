@@ -1,5 +1,5 @@
 vision_height_mm: 560.0
-cross_side_safe_height_mm: 510.0
+cross_side_safe_height_mm: 410.0
 height_tolerance_mm: 1.0
 y_position_tolerance_mm: 1.0
 stable_read_count: 2

@@ -1149,6 +1149,7 @@ class ArmVisionWorkflowService(LifecycleTracked):
             or "FAKE PLC PLACE DONE" in line
             or "Return right_outer" in line
             or "Return left_outer" in line
+            or "Lower to pick-approach height" in line
         )
 
     @staticmethod
@@ -1167,6 +1168,7 @@ class ArmVisionWorkflowService(LifecycleTracked):
                 "Move right target",
                 "Return right_outer",
                 "Return left_outer",
+                "Lower to pick-approach height",
             )
         )
 

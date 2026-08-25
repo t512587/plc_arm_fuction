@@ -6,7 +6,7 @@ step
 type=control_settings
 x_speed=300
 y1_speed=400
-height_reference_depth_mm=611.0
+height_reference_depth_mm=700.0
 
 step
 type=amr_connect

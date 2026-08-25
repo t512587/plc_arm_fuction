@@ -460,7 +460,7 @@ class ConfigTests(unittest.TestCase):
             store.get_service("lift")["arm_camera_not_home_maximum_height_mm"],
         )
         self.assertEqual(
-            620.0,
+            700.0,
             store.get_service("arm_vision_workflow")["height_reference_depth_mm"],
         )
         self.assertEqual(
@@ -495,7 +495,7 @@ class ConfigTests(unittest.TestCase):
             store.get_service("middle_vacuum")["release_settle_seconds"],
         )
         self.assertEqual(
-            460.0,
+            410.0,
             store.get_flow("main_cycle")["cross_side_safe_height_mm"],
         )
         self.assertTrue(store.get_point("Y1_MOVE").writable)

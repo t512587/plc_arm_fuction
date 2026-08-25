@@ -94,7 +94,7 @@ from arm_config import (  # noqa: E402
 # two constants with the demo URL and Basic Auth tuple.
 SERVER_URL = "https://demo.bizlion.com.tw/tmts/suction-hotspot/detect"
 SERVER_AUTH = ("tmts", "N1++jI8eBOLTogEL0gLz5ehBhTqv50cjKonThISlrQo=")
-#SERVER_URL = "http://192.168.50.233:8000/detect"
+#SERVER_URL = "http://192.168.51.170:8000/detect"
 #SERVER_AUTH = None
 
 # Default depth filter sent to server, per view.
@@ -135,17 +135,16 @@ CALIB_BY_VIEW = {
     "LView": {
         # Second-car LView calibration, fitted from 24 samples.
         # ID 142 RMSE ~= 1.684 deg, max error ~= 3.722 deg
-        "ID 142": (-3.41643143, -0.85823981, 0.05802321, -0.09017803, 0.10025649, 58.07462456),
+        "ID 142": (-3.34120461, -1.17601276, 0.04006401, -0.08350485, 0.07723524, 57.30519095),
         # ID 143 RMSE ~= 1.743 deg, max error ~= 4.249 deg
-        "ID 143": (1.34783807, 3.65204515, -0.13589233, -0.01394930, -0.13336646, -88.48138011),
+        "ID 143": (1.18266447, 3.65115963, -0.11902123, -0.01559711, -0.13202432, 1.05487994),
     },
-
     # Second-car RView calibration, fitted from 21 samples.
     # ID 142 RMSE ~= 1.765 deg, max error ~= 3.945 deg
     # ID 143 RMSE ~= 2.106 deg, max error ~= 5.839 deg
     "RView": {
-        "ID 142": (3.50379437, -0.77081708, -0.03201293, -0.09647447, -0.07305849, -48.91500422),
-        "ID 143": (-1.42868671, 3.63586380, 0.10614333, -0.00233213, 0.09877633, 41.54382802),
+        "ID 142": (3.42251331, -0.85247532, -0.02211729, -0.10388149, -0.08305748, -49.86252955),
+        "ID 143": (-1.32568065, 3.92176023, 0.10102357, 0.00734931, 0.08681400, 134.13924418),
     },
 }
 
@@ -155,12 +154,12 @@ CALIB_BY_VIEW = {
 PREDICTION_LIMITS_BY_VIEW = {
     "LView": {
         "ID 142": (9.0, 114.0),
-        "ID 143": (-172.0, -62.0),
+        "ID 143": (-88.0, 24.0),
     },
 
     "RView": {
-        "ID 142": (-100.0, 14.0),
-        "ID 143": (15.0, 127.0),
+        "ID 142": (-100.0, 5.0),
+        "ID 143": (108.0, 213.0),
     },
 }
 
@@ -2153,6 +2152,11 @@ def main() -> None:
             # Full flow: pick the object
             if not target_angles:
                 raise RuntimeError(f"{view} has no predicted target angles; cannot execute.")
+            step_pause(
+                "Lower to pick-approach height before moving toward target",
+                args.auto_step,
+                0.5,
+            )
             run_post_detection_pick_flow(
                 controller=controller,
                 view=view,
