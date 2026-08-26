@@ -39,7 +39,7 @@ CAMERA_SMALL = "ID 144"
 # None means no limit. Values are absolute multi-turn angles.
 # ID142 big arm: HOME(125.7) ± 90° = [35.7, 215.7] to avoid hitting frame
 MOTOR_ANGLE_LIMITS: dict[str, tuple[float, float] | None] = {
-    "ID 142": (-70, 113),    # vacuum big arm: ±90° from HOME
+    "ID 142": (-100, 120),    # vacuum big arm: ±90° from HOME
     "ID 143": None,             # vacuum small arm: no limit
     "ID 144": None,             # camera small arm: no limit
     "ID 145": None,             # camera big arm: no limit

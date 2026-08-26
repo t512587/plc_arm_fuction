@@ -153,13 +153,13 @@ CALIB_BY_VIEW = {
 # still uses general motor limits from canbus/arm_config.py.
 PREDICTION_LIMITS_BY_VIEW = {
     "LView": {
-        "ID 142": (9.0, 114.0),
-        "ID 143": (-88.0, 24.0),
+        "ID 142": (6.0, 120.0),
+        "ID 143": (-108.0, 6.0),
     },
 
     "RView": {
-        "ID 142": (-100.0, 5.0),
-        "ID 143": (108.0, 213.0),
+        "ID 142": (-100.0, 6.0),
+        "ID 143": (66.0, 213.0),
     },
 }
 
